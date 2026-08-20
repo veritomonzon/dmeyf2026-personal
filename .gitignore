@@ -1,0 +1,31 @@
+# Datos
+*.csv
+*.rds
+*.ods
+
+# Material docente / multimedia
+*.pdf
+*.mp3
+
+# Archivos internos de R
+.Rhistory
+.RData
+.Rproj.user/
+
+# macOS
+.DS_Store
+
+# Seguimiento personal / operativo
+PRINCIPAL.md
+FLUJO_DE_TRABAJO.md
+Zulip/
+
+# Transcripciones
+*.txt
+
+# No versionar materiales de clase ni skill personal
+Clase 1/
+SKILL_analisis_estadistico.md
+
+# Archivos de instrucciones
+Primera competencia/*.md
