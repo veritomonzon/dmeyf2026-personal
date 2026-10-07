@@ -13,9 +13,9 @@ options(scipen = 999)
 # Despues de correr: completar resultados en el HISTORIAL y commitear.
 
 PARAM <- list(
-    experimento = "exp03a_baja2_bin255",
+    experimento = "exp03b_baja2_bin31",
     target = "baja2", # "baja2" = BAJA+2 vs resto | "baja12" = BAJA+1 + BAJA+2 vs CONTINUA
-    max_bin = 255L, # 255 = default LightGBM | 31 = frugal (Clase 06)
+    max_bin = 31L, # 255 = default LightGBM | 31 = frugal (Clase 06)
     modo_ht = "fijos", # "busqueda" = random search | "fijos" = hp fijos x semillas | "ninguno" = reusar HT_resultados.csv
     n_iteraciones = 450L, # solo modo_ht = "busqueda"
     n_semillas_cv = 5L, # solo modo_ht = "fijos" (toma las primeras de PARAM$semillas)
@@ -27,7 +27,7 @@ PARAM <- list(
         333331L, 444443L, 555557L, 666667L, 121313L,
         533129L, 600011L, 700001L, 800011L, 900001L
     ),
-    corte_final = NA_integer_ # NA = envios_optimos de CV | o fijar, ej. 11000L
+    corte_final = 11000L # NA = envios_optimos de CV | o fijar, ej. 11000L
 )
 
 # ------------------------------------------------------------
