@@ -6,6 +6,46 @@ gc()
 options(scipen = 999)
 
 # ============================================================
+# CONFIGURACION DEL EXPERIMENTO
+# ============================================================
+# Unico bloque que se modifica entre corridas (Mac o VM).
+# Antes de correr: actualizar PARAM y agregar la linea al HISTORIAL.
+# Despues de correr: completar resultados en el HISTORIAL y commitear.
+
+PARAM <- list(
+    experimento = "exp03a_baja2_bin255",
+    target = "baja2", # "baja2" = BAJA+2 vs resto | "baja12" = BAJA+1 + BAJA+2 vs CONTINUA
+    max_bin = 255L, # 255 = default LightGBM | 31 = frugal (Clase 06)
+    modo_ht = "fijos", # "busqueda" = random search | "fijos" = hp fijos x semillas | "ninguno" = reusar HT_resultados.csv
+    n_iteraciones = 450L, # solo modo_ht = "busqueda"
+    n_semillas_cv = 5L, # solo modo_ht = "fijos" (toma las primeras de PARAM$semillas)
+    hp_fijos = list( # solo modo_ht = "fijos" (champion exp01, iter 135)
+        num_leaves = 16L, min_data_in_leaf = 800L, feature_fraction = 0.2704,
+        learning_rate = 0.0172, num_iterations = 550L
+    ),
+    semillas = c(
+        333331L, 444443L, 555557L, 666667L, 121313L,
+        533129L, 600011L, 700001L, 800011L, 900001L
+    ),
+    corte_final = NA_integer_ # NA = envios_optimos de CV | o fijar, ej. 11000L
+)
+
+# ------------------------------------------------------------
+# HISTORIAL DE EXPERIMENTOS (registro, no se ejecuta)
+# ------------------------------------------------------------
+# exp01_mac_154iter   | Mac | baja2 | max_bin 255 | busqueda (154 iters)
+#   champion it135: leaves 16, min_data 800, ff 0.2704, lr 0.0172, iters 550
+#   CV 202106: $476.822.500 (corte 10.221)
+#   Public: 10 sem 91,03 +- 2,09 | ensamble10 89,24 | semilla unica c11000 91,41
+# exp02_vm_276iter    | VM  | baja2 | max_bin 255 | busqueda (276 iters)
+#   champion it122: leaves 96, min_data 800, ff 0.2330, lr 0.0156, iters 550
+#   CV 202106: $475.392.500 (corte 11.513)
+#   Public: 10 sem 90,57 +- 3,82 | ensamble10 89,84
+# exp03a_baja2_bin255 | Mac | baja2  | max_bin 255 | fijos champion exp01 x 5 sem | PENDIENTE
+# exp03b_baja2_bin31  | Mac | baja2  | max_bin 31  | fijos champion exp01 x 5 sem | PENDIENTE
+# exp03c_baja12_bin31 | Mac | baja12 | max_bin 31  | fijos champion exp01 x 5 sem | PENDIENTE
+
+# ============================================================
 # CARGA DE LIBRERIAS Y CARGA DE BASE
 # ============================================================
 
@@ -25,18 +65,24 @@ library(lightgbm)
 # ============================================================
 
 dir_base <- if (dir.exists("~/data")) "~/data" else "Primera competencia"
+dir_exp <- file.path(dir_base, "exp", PARAM$experimento)
 
 while (sink.number() > 0) sink()
 closeAllConnections()
 
-dir.create(file.path(dir_base, "logs"), showWarnings = FALSE)
-dir.create(file.path(dir_base, "plots"), showWarnings = FALSE)
+dir.create(file.path(dir_base, "plots"), showWarnings = FALSE) # AED, compartido entre experimentos
+dir.create(file.path(dir_exp, "logs"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(dir_exp, "plots"), recursive = TRUE, showWarnings = FALSE)
 
-log_con <- file(file.path(dir_base, "logs/primera_competencia.md"), open = "at")
+log_con <- file(file.path(dir_exp, "logs/primera_competencia.md"), open = "at")
 sink(log_con, append = TRUE, split = TRUE)
 
 cat("--- INICIO DE EJECUCION: PRIMERA COMPETENCIA ---\n")
-cat("Fecha y hora:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n\n")
+cat("Fecha y hora:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n")
+cat("Entorno:", if (dir_base == "~/data") "VM" else "Mac local", "\n")
+cat("Configuracion del experimento:\n")
+str(PARAM)
+cat("\n")
 
 # ============================================================
 # CARGA DE BASE DE DATOS
@@ -451,6 +497,19 @@ if (!file.exists(archivo_rds_fe)) {
 if (!exists("tiempo_fe_inicio")) tiempo_fe_inicio <- Sys.time()
 k_folds <- 5L
 
+# ============================================================
+# TARGET DE ENTRENAMIENTO SEGUN EXPERIMENTO
+# ============================================================
+# La ganancia se evalua SIEMPRE con BAJA+2 real (target_eval);
+# solo cambia la etiqueta con la que aprende LightGBM (target_entreno).
+target_eval <- df_train$clase01
+target_entreno <- if (PARAM$target == "baja12") {
+    as.integer(df_train$clase_ternaria %in% c("BAJA+1", "BAJA+2"))
+} else {
+    df_train$clase01
+}
+cat("Target de entrenamiento:", PARAM$target, "- positivos:", sum(target_entreno), "\n")
+
 # 6. Función de Ganancia de Negocio Oficial
 # Ganancia = TP * $1.072.500 - FP * $27.500
 calcular_ganancia_maxima <- function(probs, target_real) {
@@ -472,6 +531,13 @@ calcular_ganancia_maxima <- function(probs, target_real) {
     ))
 }
 
+# Ganancia en un corte fijo de envios (comparacion justa entre experimentos:
+# el maximo de la curva elige el corte a posteriori y es optimista)
+ganancia_en_corte <- function(probs, target_real, corte = 11000L) {
+    y_top <- target_real[order(-probs)][1:corte]
+    sum(fifelse(y_top == 1L, 1072500, -27500))
+}
+
 cat("Estructura de validación cruzada y función de ganancia listas.\n")
 
 # ============================================================
@@ -481,11 +547,10 @@ cat("Estructura de validación cruzada y función de ganancia listas.\n")
 # 1. Objetos base obligatorios para el Bloque 7 y Bloque 8
 cat("\nConstruyendo matriz numérica de entrenamiento...\n")
 mat_train <- as.matrix(df_train[, ..campos_buenos])
-target_vector <- df_train$clase01
-archivo_ht <- file.path(dir_base, "HT_resultados.csv")
+archivo_ht <- file.path(dir_exp, "HT_resultados.csv")
 
-# LLAVE DE CONTROL: En FALSE usa las iteraciones ya guardadas en HT_resultados.csv
-correr_ht_nocturno <- TRUE
+# Modo de busqueda definido en PARAM (ver CONFIGURACION DEL EXPERIMENTO)
+correr_ht_nocturno <- PARAM$modo_ht != "ninguno"
 
 if (correr_ht_nocturno) {
     cat("\n--- INICIO DE OPTIMIZACIÓN DE HIPERPARÁMETROS (HT) ---\n")
@@ -499,8 +564,8 @@ if (correr_ht_nocturno) {
         idx_tr <- which(df_train$fold != k)
         folds_datasets[[k]] <- lgb.Dataset(
             data = mat_train[idx_tr, ],
-            label = target_vector[idx_tr],
-            params = list(feature_pre_filter = FALSE),
+            label = target_entreno[idx_tr],
+            params = list(max_bin = PARAM$max_bin, feature_pre_filter = FALSE),
             free_raw_data = FALSE
         )
     }
@@ -513,6 +578,8 @@ if (correr_ht_nocturno) {
             ganancia_max = numeric(),
             envios_optimos = integer(),
             prob_corte = numeric(),
+            semilla = integer(),
+            gan_c11000 = numeric(),
             num_leaves = integer(),
             min_data_in_leaf = integer(),
             feature_fraction = numeric(),
@@ -524,7 +591,7 @@ if (correr_ht_nocturno) {
     }
 
     # 4. Parámetros de ejecución nocturna
-    n_iteraciones <- 450L
+    n_iteraciones <- if (PARAM$modo_ht == "fijos") PARAM$n_semillas_cv else PARAM$n_iteraciones
     mejor_ganancia_global <- -Inf
 
     cat(sprintf("Iniciando búsqueda de %d iteraciones. Resultados se grabarán en: %s\n\n", n_iteraciones, archivo_ht))
@@ -535,12 +602,22 @@ if (correr_ht_nocturno) {
     for (i in 1:n_iteraciones) {
         t_iter_inicio <- Sys.time()
 
-        # Generación de hiperparámetros candidatos
-        p_num_leaves <- sample(c(16L, 24L, 31L, 48L, 64L, 96L, 128L), 1)
-        p_min_data_in_leaf <- sample(c(100L, 150L, 250L, 400L, 600L, 800L), 1)
-        p_feature_fraction <- round(runif(1, 0.15, 0.40), 4)
-        p_learning_rate <- round(runif(1, 0.015, 0.035), 4)
-        p_num_iterations <- sample(c(550L, 650L, 750L, 850L), 1)
+        # Generación de hiperparámetros candidatos (o fijos x semilla)
+        if (PARAM$modo_ht == "fijos") {
+            p_num_leaves <- PARAM$hp_fijos$num_leaves
+            p_min_data_in_leaf <- PARAM$hp_fijos$min_data_in_leaf
+            p_feature_fraction <- PARAM$hp_fijos$feature_fraction
+            p_learning_rate <- PARAM$hp_fijos$learning_rate
+            p_num_iterations <- PARAM$hp_fijos$num_iterations
+            p_semilla <- PARAM$semillas[i]
+        } else {
+            p_num_leaves <- sample(c(16L, 24L, 31L, 48L, 64L, 96L, 128L), 1)
+            p_min_data_in_leaf <- sample(c(100L, 150L, 250L, 400L, 600L, 800L), 1)
+            p_feature_fraction <- round(runif(1, 0.15, 0.40), 4)
+            p_learning_rate <- round(runif(1, 0.015, 0.035), 4)
+            p_num_iterations <- sample(c(550L, 650L, 750L, 850L), 1)
+            p_semilla <- NA_integer_
+        }
 
         param_lgb <- list(
             objective = "binary",
@@ -554,6 +631,9 @@ if (correr_ht_nocturno) {
             verbosity = -1,
             num_threads = parallel::detectCores()
         )
+        # La semilla de LightGBM solo se fija en modo "fijos" (en "busqueda" se
+        # mantiene el comportamiento de exp01/exp02 para que sigan siendo reproducibles)
+        if (!is.na(p_semilla)) param_lgb$seed <- p_semilla
 
         # Vector para recolectar predicciones Out-of-Fold (OOF) completas
         pred_oof <- rep(0.0, nrow(df_train))
@@ -573,7 +653,7 @@ if (correr_ht_nocturno) {
         }
 
         # Evaluación de la ganancia sobre el 100% de las predicciones OOF de 202106
-        res_eval <- calcular_ganancia_maxima(pred_oof, target_vector)
+        res_eval <- calcular_ganancia_maxima(pred_oof, target_eval)
         t_iter_fin <- Sys.time()
         duracion_seg <- round(as.numeric(difftime(t_iter_fin, t_iter_inicio, units = "secs")), 1)
 
@@ -583,6 +663,8 @@ if (correr_ht_nocturno) {
             ganancia_max = res_eval$ganancia,
             envios_optimos = res_eval$envios_optimos,
             prob_corte = round(res_eval$probabilidad_corte, 5),
+            semilla = p_semilla,
+            gan_c11000 = ganancia_en_corte(pred_oof, target_eval, 11000L),
             num_leaves = p_num_leaves,
             min_data_in_leaf = p_min_data_in_leaf,
             feature_fraction = p_feature_fraction,
@@ -612,6 +694,21 @@ if (correr_ht_nocturno) {
     tiempo_ht_fin <- Sys.time()
     cat("\n--- OPTIMIZACIÓN FINALIZADA ---\n")
     cat("Tiempo total de búsqueda:", round(difftime(tiempo_ht_fin, tiempo_ht_inicio, units = "hours"), 2), "horas\n")
+
+    if (PARAM$modo_ht == "fijos") {
+        tb_fijos <- fread(archivo_ht)
+        cat("\n--- RESUMEN MULTISEMILLA EN CV (202106) ---\n")
+        cat(sprintf(
+            "Ganancia c11000 -> media: $ %s | SD: $ %s\n",
+            format(round(mean(tb_fijos$gan_c11000)), big.mark = "."),
+            format(round(sd(tb_fijos$gan_c11000)), big.mark = ".")
+        ))
+        cat(sprintf(
+            "Ganancia maxima -> media: $ %s | SD: $ %s\n",
+            format(round(mean(tb_fijos$ganancia_max)), big.mark = "."),
+            format(round(sd(tb_fijos$ganancia_max)), big.mark = ".")
+        ))
+    }
 } else {
     cat("\nSalteando bucle HT nocturno: se utilizan las iteraciones ya guardadas en", archivo_ht, "\n")
 }
@@ -656,7 +753,8 @@ param_champion <- list(
 cat("\nReentrenando modelo definitivo con el 100% de los clientes de 202106...\n")
 dtrain_final <- lgb.Dataset(
     data = mat_train,
-    label = target_vector,
+    label = target_entreno,
+    params = list(max_bin = PARAM$max_bin),
     free_raw_data = FALSE
 )
 
@@ -687,11 +785,10 @@ graf_importancia <- ggplot(head(tb_importancia, 30), aes(x = reorder(Feature, Ga
     ) +
     theme_minimal()
 
-dir.create(file.path(dir_base, "plots"), showWarnings = FALSE)
-ggsave(file.path(dir_base, "plots/feature_importance_top30.png"),
+ggsave(file.path(dir_exp, "plots/feature_importance_top30.png"),
     plot = graf_importancia, width = 10, height = 8, dpi = 300
 )
-cat("Gráfico guardado en:", file.path(dir_base, "plots/feature_importance_top30.png"), "\n")
+cat("Gráfico guardado en:", file.path(dir_exp, "plots/feature_importance_top30.png"), "\n")
 
 # ============================================================
 # 9. SCORING SOBRE FOTO_MES 202108 (TEST / FUTURO)
@@ -721,13 +818,18 @@ cat("Rango de probabilidades asignadas: [", round(min(tb_predicciones$prob), 5),
 # ============================================================
 
 cat("\n--- GENERACIÓN DE ARCHIVOS PARA EL BOT (@competencia-uno) ---\n")
-dir.create(file.path(dir_base, "submits"), showWarnings = FALSE)
 
-# Definir abanico de cortes estratégicos alrededor del óptimo de CV (10221)
-cortes_envios <- sort(unique(c(9500L, 10000L, 10500L, 11000L, 11500L, 12000L, as.integer(mejor_registro$envios_optimos))))
+# Identificador unico: experimento + iteracion champion (evita nombres fijos a mano)
+id_modelo <- sprintf("%s_it%03d", PARAM$experimento, mejor_registro$iteracion)
+corte_elegido <- if (is.na(PARAM$corte_final)) as.integer(mejor_registro$envios_optimos) else PARAM$corte_final
+
+dir.create(file.path(dir_exp, "submits"), showWarnings = FALSE)
+
+# Abanico de cortes estrategicos alrededor del corte elegido
+cortes_envios <- sort(unique(c(9500L, 10000L, 10500L, 11000L, 11500L, 12000L, corte_elegido)))
 
 for (corte in cortes_envios) {
-    archivo_submit <- file.path(dir_base, sprintf("submits/submit_lgbm_corte_%05d.csv", corte))
+    archivo_submit <- file.path(dir_exp, sprintf("submits/%s_c%05d.csv", id_modelo, corte))
 
     # Exportación con formato estricto para el bot (solo columna de IDs, sin encabezado)
     fwrite(
@@ -747,23 +849,20 @@ for (corte in cortes_envios) {
 # 11. MULTI-SEMILLA PARA EL BOT (MEDIA/SD) Y ENSAMBLE FINAL
 # ============================================================
 
-cat("\n--- INICIO DE ENTRENAMIENTO MULTI-SEMILLA (10 SEMILLAS) ---\n")
+cat("\n--- INICIO DE ENTRENAMIENTO MULTI-SEMILLA ---\n")
 
-# 1. Vector de 10 semillas (las 6 oficiales + 4 primas adicionales)
-semillas_evaluacion <- c(
-    333331L, 444443L, 555557L, 666667L, 121313L,
-    533129L, 600011L, 700001L, 800011L, 900001L
-)
+# 1. Vector de semillas definido en PARAM (CONFIGURACION DEL EXPERIMENTO)
+semillas_evaluacion <- PARAM$semillas
 
-corte_elegido <- as.integer(mejor_registro$envios_optimos) # 10221
-dir.create(file.path(dir_base, "submits_semillas"), showWarnings = FALSE)
+dir.create(file.path(dir_exp, "submits_semillas"), showWarnings = FALSE)
 
 # Acumulador de probabilidades para el ensamble promedio
 prob_acumulada <- rep(0.0, nrow(mat_future))
 
 dtrain_full <- lgb.Dataset(
     data = mat_train,
-    label = target_vector,
+    label = target_entreno,
+    params = list(max_bin = PARAM$max_bin),
     free_raw_data = FALSE
 )
 
@@ -801,8 +900,8 @@ for (idx_s in seq_along(semillas_evaluacion)) {
     setorder(tb_pred_s, -prob)
 
     archivo_s <- file.path(
-        dir_base,
-        sprintf("submits_semillas/submit_iter135_c%05d_s%02d_%d.csv", corte_elegido, idx_s, semilla_actual)
+        dir_exp,
+        sprintf("submits_semillas/%s_c%05d_s%02d_%d.csv", id_modelo, corte_elegido, idx_s, semilla_actual)
     )
 
     fwrite(
@@ -811,10 +910,10 @@ for (idx_s in seq_along(semillas_evaluacion)) {
         col.names = FALSE
     )
 
-    cat(sprintf("[Semilla %02d/10 - %d] Exportado: %s\n", idx_s, semilla_actual, archivo_s))
+    cat(sprintf("[Semilla %02d/%d - %d] Exportado: %s\n", idx_s, length(semillas_evaluacion), semilla_actual, archivo_s))
 }
 
-# 2. Exportar tambien el Ensamble Promedio de las 10 semillas (1 solo archivo para el domingo)
+# 2. Exportar tambien el Ensamble Promedio de las semillas (1 solo archivo para el domingo)
 tb_ensamble <- data.table(
     numero_de_cliente = df_future$numero_de_cliente,
     prob = prob_acumulada / length(semillas_evaluacion)
@@ -822,8 +921,8 @@ tb_ensamble <- data.table(
 setorder(tb_ensamble, -prob)
 
 archivo_ensamble <- file.path(
-    dir_base,
-    sprintf("submits/submit_iter135_ensamble10_c%05d.csv", corte_elegido)
+    dir_exp,
+    sprintf("submits/%s_ensamble%d_c%05d.csv", id_modelo, length(semillas_evaluacion), corte_elegido)
 )
 fwrite(
     tb_ensamble[1:corte_elegido, .(numero_de_cliente)],
@@ -831,7 +930,13 @@ fwrite(
     col.names = FALSE
 )
 
-cat(sprintf("\nArchivo Ensamble Final (10 semillas promediadas) generado en:\n%s\n", archivo_ensamble))
+# Probabilidades del ensamble (permite recortar en cualquier corte sin reentrenar)
+fwrite(tb_ensamble, file = file.path(dir_exp, "probabilidades_ensamble_202108.csv"))
+
+cat(sprintf(
+    "\nArchivo Ensamble Final (%d semillas promediadas) generado en:\n%s\n",
+    length(semillas_evaluacion), archivo_ensamble
+))
 
 # ============================================================
 # CIERRE FORMAL DEL LOG
