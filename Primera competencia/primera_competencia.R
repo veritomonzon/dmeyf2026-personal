@@ -13,8 +13,8 @@ options(scipen = 999)
 # Despues de correr: completar resultados en el HISTORIAL y commitear.
 
 PARAM <- list(
-    experimento = "exp03b_baja2_bin31",
-    target = "baja2", # "baja2" = BAJA+2 vs resto | "baja12" = BAJA+1 + BAJA+2 vs CONTINUA
+    experimento = "exp03c_baja12_bin31",
+    target = "baja12", # "baja2" = BAJA+2 vs resto | "baja12" = BAJA+1 + BAJA+2 vs CONTINUA
     max_bin = 31L, # 255 = default LightGBM | 31 = frugal (Clase 06)
     modo_ht = "fijos", # "busqueda" = random search | "fijos" = hp fijos x semillas | "ninguno" = reusar HT_resultados.csv
     n_iteraciones = 450L, # solo modo_ht = "busqueda"
@@ -41,8 +41,13 @@ PARAM <- list(
 #   champion it122: leaves 96, min_data 800, ff 0.2330, lr 0.0156, iters 550
 #   CV 202106: $475.392.500 (corte 11.513)
 #   Public: 10 sem 90,57 +- 3,82 | ensamble10 89,84
-# exp03a_baja2_bin255 | Mac | baja2  | max_bin 255 | fijos champion exp01 x 5 sem | PENDIENTE
-# exp03b_baja2_bin31  | Mac | baja2  | max_bin 31  | fijos champion exp01 x 5 sem | PENDIENTE
+# exp03a_baja2_bin255 | Mac | baja2  | max_bin 255 | fijos champion exp01 x 5 sem | 13 min
+#   CV 202106: gan_c11000 463.320.000 +- 2.847.279 | gan_max 468.138.000 +- 6.007.583
+#   La semilla 333331 dio 478,7 M: el 476,8 M de exp01 estaba inflado por la semilla
+# exp03b_baja2_bin31  | Mac | baja2  | max_bin 31  | fijos champion exp01 x 5 sem | 13 min
+#   CV 202106: gan_c11000 471.900.000 +- 5.159.457 | gan_max 477.873.000 +- 4.906.088
+#   vs exp03a: +8,6 M en c11000, mejora en las 5 semillas (t apareado p ~ 0,008); sin ganancia de velocidad
+#   Public: 10 sem 96,14 +- 3,65 (c11000) vs exp01 91,03 +- 2,09 (c10221)
 # exp03c_baja12_bin31 | Mac | baja12 | max_bin 31  | fijos champion exp01 x 5 sem | PENDIENTE
 
 # ============================================================
