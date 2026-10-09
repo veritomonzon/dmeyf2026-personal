@@ -13,11 +13,11 @@ options(scipen = 999)
 # Despues de correr: completar resultados en el HISTORIAL y commitear.
 
 PARAM <- list(
-    experimento = "exp03c_baja12_bin31",
+    experimento = "exp04a_baja12_bin31_busqueda",
     target = "baja12", # "baja2" = BAJA+2 vs resto | "baja12" = BAJA+1 + BAJA+2 vs CONTINUA
     max_bin = 31L, # 255 = default LightGBM | 31 = frugal (Clase 06)
-    modo_ht = "fijos", # "busqueda" = random search | "fijos" = hp fijos x semillas | "ninguno" = reusar HT_resultados.csv
-    n_iteraciones = 450L, # solo modo_ht = "busqueda"
+    modo_ht = "busqueda", # "busqueda" = random search | "fijos" = hp fijos x semillas | "ninguno" = reusar HT_resultados.csv
+    n_iteraciones = 200L, # solo modo_ht = "busqueda"
     n_semillas_cv = 5L, # solo modo_ht = "fijos" (toma las primeras de PARAM$semillas)
     hp_fijos = list( # solo modo_ht = "fijos" (champion exp01, iter 135)
         num_leaves = 16L, min_data_in_leaf = 800L, feature_fraction = 0.2704,
@@ -48,7 +48,24 @@ PARAM <- list(
 #   CV 202106: gan_c11000 471.900.000 +- 5.159.457 | gan_max 477.873.000 +- 4.906.088
 #   vs exp03a: +8,6 M en c11000, mejora en las 5 semillas (t apareado p ~ 0,008); sin ganancia de velocidad
 #   Public: 10 sem 96,14 +- 3,65 (c11000) vs exp01 91,03 +- 2,09 (c10221)
-# exp03c_baja12_bin31 | Mac | baja12 | max_bin 31  | fijos champion exp01 x 5 sem | PENDIENTE
+# exp03c_baja12_bin31 | Mac | baja12 | max_bin 31  | fijos champion exp01 x 5 sem | 12 min
+#   CV 202106: gan_c11000 489.720.000 +- 3.336.465 | gan_max 494.439.000 +- 1.471.520
+#   vs exp03b: +17,8 M en c11000, mejora en las 5 semillas (t apareado p ~ 0,006)
+#   Public: 10 sem 102,84 +- 1,75 (c11000) -> SUBMIT FINAL
+#   Public 09-oct: champion it004 c11000 (1 archivo, modelo unico) 103,18
+#     ID 1542-1791541200393478 | nombre "exp03c-it004-ens10-c11000-final" (no es el ensamble)
+# exp03d_baja12_bin31_c12000 | Mac | = exp03c, modo ninguno, corte 12.000 | 4 min
+#   Public: 10 sem 101,14 +- 2,70 (vs exp03c c11000 102,84 +- 1,75) -> se mantiene corte 11.000
+# exp04a_baja12_bin31_busqueda | Mac | baja12 | max_bin 31 | busqueda 200 iters | 7,6 h
+#   Rangos: leaves {8..64}, min_data {400..2000}, ff [0.15, 0.50], lr [0.010, 0.035], iters {450..1000}
+#   (exp01/exp02 usaron: leaves {16..128}, min_data {100..800}, ff [0.15, 0.40], lr [0.015, 0.035], iters {550..850})
+#   champion it104: leaves 31, min_data 2000, ff 0.4063, lr 0.0307, iters 550
+#   CV 202106: $514.470.000 (corte 10.132) -> max de 200 corridas de 1 semilla, optimista
+#   Public 09-oct: champion it104 c11000 (1 archivo, modelo unico) 101,37
+#     ID 1542-1791541156021276 | enviado por error con nombre "exp03c-it004-ens10-c11000-final"
+#   vs exp03c (103,18 / 10 sem 102,84 +- 1,75): no mejora -> se descarta, se mantiene exp03c
+#   Top 11.000 comparte 9.962 clientes con exp03c (Spearman probs 0,94)
+
 
 # ============================================================
 # CARGA DE LIBRERIAS Y CARGA DE BASE
@@ -616,11 +633,13 @@ if (correr_ht_nocturno) {
             p_num_iterations <- PARAM$hp_fijos$num_iterations
             p_semilla <- PARAM$semillas[i]
         } else {
-            p_num_leaves <- sample(c(16L, 24L, 31L, 48L, 64L, 96L, 128L), 1)
-            p_min_data_in_leaf <- sample(c(100L, 150L, 250L, 400L, 600L, 800L), 1)
-            p_feature_fraction <- round(runif(1, 0.15, 0.40), 4)
-            p_learning_rate <- round(runif(1, 0.015, 0.035), 4)
-            p_num_iterations <- sample(c(550L, 650L, 750L, 850L), 1)
+            # Rangos ampliados en exp04: el champion de exp01 quedo en el borde
+            # (num_leaves = 16 minimo, min_data_in_leaf = 800 maximo de la grilla anterior)
+            p_num_leaves <- sample(c(8L, 12L, 16L, 24L, 31L, 48L, 64L), 1)
+            p_min_data_in_leaf <- sample(c(400L, 600L, 800L, 1000L, 1300L, 1600L, 2000L), 1)
+            p_feature_fraction <- round(runif(1, 0.15, 0.50), 4)
+            p_learning_rate <- round(runif(1, 0.010, 0.035), 4)
+            p_num_iterations <- sample(c(450L, 550L, 700L, 850L, 1000L), 1)
             p_semilla <- NA_integer_
         }
 
