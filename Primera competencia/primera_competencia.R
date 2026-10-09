@@ -13,22 +13,54 @@ options(scipen = 999)
 # Despues de correr: completar resultados en el HISTORIAL y commitear.
 
 PARAM <- list(
-    experimento = "exp04a_baja12_bin31_busqueda",
+    experimento = "exp05_clase8_bo3hp_100sem",
     target = "baja12", # "baja2" = BAJA+2 vs resto | "baja12" = BAJA+1 + BAJA+2 vs CONTINUA
-    max_bin = 31L, # 255 = default LightGBM | 31 = frugal (Clase 06)
-    modo_ht = "busqueda", # "busqueda" = random search | "fijos" = hp fijos x semillas | "ninguno" = reusar HT_resultados.csv
-    n_iteraciones = 200L, # solo modo_ht = "busqueda"
-    n_semillas_cv = 5L, # solo modo_ht = "fijos" (toma las primeras de PARAM$semillas)
-    hp_fijos = list( # solo modo_ht = "fijos" (champion exp01, iter 135)
-        num_leaves = 16L, min_data_in_leaf = 800L, feature_fraction = 0.2704,
-        learning_rate = 0.0172, num_iterations = 550L
+    max_bin = 31L, # 255 = default LightGBM | 31 = frugal (Clase 06 / Clase 08)
+    undersampling = 1.0, # Clase 08: 1.0 = sin undersampling (100% de CONTINUA)
+    train_bo = c(202103L, 202104L), # Desarrollo (BO): entrena en 03+04 (deja 05 de gap)
+    val_bo = 202106L, # Desarrollo (BO): valida ganancia suavizada en 06
+    train_final = c(202103L, 202104L, 202105L, 202106L), # Produccion: entrena en 03+04+05+06
+    future = 202108L, # Produccion: predice exclusivamente en 08
+    modo_ht = "bayesiana", # "bayesiana" = mlrMBO 3 HPs | "fijos" = hp_fijos | "ninguno" = reusar BO_log.txt / HT_resultados.csv
+    bo_iteraciones = 50L, # 12 initdesign (4*k) + 38 iteraciones inteligentes Kriging (~2,5h en M3)
+    lgbm_fijos = list(
+        learning_rate = 0.01,
+        feature_fraction = 0.5,
+        min_data_in_leaf = 0L # Apagado: regulariza por min_sum_hessian_in_leaf
     ),
+    bo_bordes = list(
+        num_iterations = c(64L, 4096L),
+        num_leaves = c(16L, 2048L),
+        min_sum_hessian_in_leaf = c(1e-06, 0.1)
+    ),
+    hp_fijos = list( # solo si modo_ht = "fijos"
+        num_leaves = 68L, min_data_in_leaf = 0L, min_sum_hessian_in_leaf = 0.025,
+        feature_fraction = 0.5, learning_rate = 0.01, num_iterations = 1500L
+    ),
+    n_semillas = 100L,
+    guardar_submits_individuales = FALSE, # FALSE evita escribir 100 CSVs sueltos en iCloud
     semillas = c(
         333331L, 444443L, 555557L, 666667L, 121313L,
-        533129L, 600011L, 700001L, 800011L, 900001L
+        111119L, 333337L, 444449L, 888887L, 999983L,
+        991313L, 991717L, 981919L, 979717L, 989797L,
+        994949L, 995959L, 996161L, 998989L, 987979L
     ),
-    corte_final = 11000L # NA = envios_optimos de CV | o fijar, ej. 11000L
+    corte_final = 11000L, # Corte principal para checkpoints y archivos individuales
+    cortes_grilla = c(9000L, 9500L, 10000L, 10500L, 11000L, 11500L, 12000L) # Grilla de cortes para el ensamble
 )
+
+# Completar automáticamente de 20 a PARAM$n_semillas (100) con primos de 6 dígitos reproducibles
+if (length(PARAM$semillas) < PARAM$n_semillas) {
+    es_primo <- rep(TRUE, 999999L)
+    es_primo[1L] <- FALSE
+    for (i in 2L:999L) {
+        if (es_primo[i]) es_primo[seq.int(i * i, 999999L, by = i)] <- FALSE
+    }
+    primos_extra <- setdiff(which(es_primo & seq_along(es_primo) >= 100000L), PARAM$semillas)
+    set.seed(PARAM$semillas[1L])
+    PARAM$semillas <- c(PARAM$semillas, sample(primos_extra, PARAM$n_semillas - length(PARAM$semillas)))
+    rm(es_primo, primos_extra, i)
+}
 
 # ------------------------------------------------------------
 # HISTORIAL DE EXPERIMENTOS (registro, no se ejecuta)
@@ -65,7 +97,10 @@ PARAM <- list(
 #     ID 1542-1791541156021276 | enviado por error con nombre "exp03c-it004-ens10-c11000-final"
 #   vs exp03c (103,18 / 10 sem 102,84 +- 1,75): no mejora -> se descarta, se mantiene exp03c
 #   Top 11.000 comparte 9.962 clientes con exp03c (Spearman probs 0,94)
-
+# exp05_clase8_bo3hp_100sem | Mac | baja12 | max_bin 31 | BO mlrMBO 3 HPs (50 iters) + 100 sem | EN CURSO
+#   Flujo Clase 8: BO train 202103+202104 (gap 202105), val 202106 (ganancia suavizada +-250)
+#   Produccion: train 202103..202106, ensamble promedio 100 semillas sobre 202108
+#   Fijos: lr 0.01, ff 0.5, min_data 0 | Bordes: iters {64..4096}, leaves {16..2048}, hessian [1e-6, 0.1]
 
 # ============================================================
 # CARGA DE LIBRERIAS Y CARGA DE BASE
@@ -81,6 +116,8 @@ library(ggplot2)
 library(tidyr)
 library(cluster)
 library(lightgbm)
+library(DiceKriging)
+library(mlrMBO)
 
 # ============================================================
 # LOG
@@ -110,7 +147,7 @@ cat("\n")
 # CARGA DE BASE DE DATOS
 # ============================================================
 
-archivo_rds_fe <- file.path(dir_base, "fe_particiones_listas.rds")
+archivo_rds_fe <- file.path(dir_base, "fe_clase8_op1_orig.rds")
 
 if (!file.exists(archivo_rds_fe)) {
     archivo_dataset <- if (file.exists(file.path(dir_base, "competencia_01.csv.gz"))) {
@@ -275,123 +312,32 @@ if (!file.exists(archivo_rds_fe)) {
     cat("Grafico guardado en:", file.path(dir_base, "plots/aed_matriz_correlacion.png"), "\n")
 
     # ============================================================
-    # ETL: CALIDAD DE DATOS, FLAGS Y COALESCENCIA DE PRODUCTOS
+    # 4. ETL: DATA QUALITY Y VARIABLES DE NEGOCIO (OPCIÓN 1)
     # ============================================================
 
-    cat("\n--- INICIO DE ETAPA: ETL Y TRATAMIENTO DE VARIABLES ---\n")
+    cat("\n--- INICIO ETAPA ETL Y DATA QUALITY (OPCIÓN 1: SIN RANKING) ---\n")
 
-    # 1. Correccion confirmada por el AED en ccajas_depositos
+    # 1. Corrección en ccajas_depositos (202105 -> NA antes de lags y deltas)
     n_corregidos <- dataset[foto_mes == 202105, sum(ccajas_depositos == 0, na.rm = TRUE)]
     dataset[foto_mes == 202105, ccajas_depositos := NA_real_]
     cat(sprintf("Data Quality: %d registros de ccajas_depositos en 202105 recodificados a NA\n", n_corregidos))
 
-    # 2. Flags binarias de tenencia de producto y acreditacion
+    # 2. Flags binarias de tenencia de producto y acreditación
     cat("\nGenerando flags de tenencia de producto...\n")
     dataset[, flag_visa := as.integer(!is.na(Visa_status))]
     dataset[, flag_master := as.integer(!is.na(Master_status))]
     dataset[, flag_tarjetas := as.integer(flag_visa == 1L | flag_master == 1L)]
     dataset[, flag_payroll := as.integer(fcoalesce(mpayroll, 0) > 0)]
 
-    # 3. Coalescencia segura y totalizadores de tarjetas (Visa + Master)
-    cat("Generando totalizadores consolidados de tarjetas con coalescencia segura...\n")
+    # 3. Totalizadores consolidados de tarjetas (Visa + Master)
+    cat("Generando totalizadores consolidados de tarjetas...\n")
     dataset[, tarjetas_mconsumototal := fcoalesce(Visa_mconsumototal, 0) + fcoalesce(Master_mconsumototal, 0)]
     dataset[, tarjetas_msaldototal := fcoalesce(Visa_msaldototal, 0) + fcoalesce(Master_msaldototal, 0)]
     dataset[, tarjetas_mlimitecompra := fcoalesce(Visa_mlimitecompra, 0) + fcoalesce(Master_mlimitecompra, 0)]
     dataset[, tarjetas_cconsumos := fcoalesce(Visa_cconsumos, 0L) + fcoalesce(Master_cconsumos, 0L)]
     dataset[, tarjetas_madelantopesos := fcoalesce(Visa_madelantopesos, 0) + fcoalesce(Master_madelantopesos, 0)]
 
-    # 4. Auditoria agregada post-ETL
-    cat("\n--- CONTROL AGREGADO DE NUEVAS VARIABLES ---\n")
-    cat("Nuevas dimensiones de la base:", nrow(dataset), "filas x", ncol(dataset), "columnas\n\n")
-
-    cat("Frecuencia de tenencia de tarjetas en la cartera:\n")
-    print(dataset[, .N, by = .(flag_visa, flag_master, flag_tarjetas)][order(-N)])
-
-    cat("\nFrecuencia de clientes con acreditacion de haberes (flag_payroll):\n")
-    print(dataset[, .N, by = .(flag_payroll)])
-
-    cat("\nResumen cuantitativo de totalizadores consolidados de tarjetas:\n")
-    print(summary(dataset[, .(tarjetas_mconsumototal, tarjetas_msaldototal, tarjetas_mlimitecompra)]))
-
-    cat("\n--- FIN ETAPA ETL ---\n\n")
-
-    # ============================================================
-    # 5. FEATURE ENGINEERING LONGITUDINAL HÍBRIDO (LAGS + RANKS)
-    # ============================================================
-
-    cat("\n--- INICIO FEATURE ENGINEERING LONGITUDINAL ---\n")
-    tiempo_fe_inicio <- Sys.time()
-
-    # 1. Asegurar orden cronológico estricto por cliente
-    setorder(dataset, numero_de_cliente, foto_mes)
-
-    # 2. Selección de variables numéricas para lags nominales
-    cols_excluir <- c("numero_de_cliente", "foto_mes", "clase_ternaria", "cliente_antiguedad")
-    cols_lags <- setdiff(names(dataset), cols_excluir)
-    cols_lags <- cols_lags[vapply(dataset[, ..cols_lags], is.numeric, logical(1))]
-
-    cat("Variables base seleccionadas para lags:", length(cols_lags), "\n")
-
-    # 3. Construcción vectorizada de Rezagos (Lags 1 y 2)
-    cat("Calculando lags nominales (orden 1 y 2)...\n")
-    cols_lag1 <- paste0(cols_lags, "_lag1")
-    cols_lag2 <- paste0(cols_lags, "_lag2")
-
-    dataset[, (cols_lag1) := shift(.SD, n = 1L, type = "lag"), by = numero_de_cliente, .SDcols = cols_lags]
-    dataset[, (cols_lag2) := shift(.SD, n = 2L, type = "lag"), by = numero_de_cliente, .SDcols = cols_lags]
-
-    # 4. Construcción de Deltas Nominales (Delta 1 y 2)
-    cat("Calculando deltas nominales...\n")
-    for (v in cols_lags) {
-        dataset[, paste0(v, "_delta1") := get(v) - get(paste0(v, "_lag1"))]
-        dataset[, paste0(v, "_delta2") := get(v) - get(paste0(v, "_lag2"))]
-    }
-
-    # 5. Función de Rankeo Intra-Mes por Signo
-    rankear_por_signo <- function(x) {
-        r <- rep(NA_real_, length(x))
-        pos <- which(x > 0)
-        neg <- which(x < 0)
-        ceros <- which(x == 0)
-        if (length(pos) > 0) r[pos] <- frank(x[pos], ties.method = "average") / length(pos)
-        if (length(neg) > 0) r[neg] <- -(frank(-x[neg], ties.method = "average") / length(neg))
-        if (length(ceros) > 0) r[ceros] <- 0
-        return(r)
-    }
-
-    # 6. Selección y normalización de variables monetarias
-    cols_monetarias <- grep("^(m|tarjetas_m|Master_m|Visa_m)", cols_lags, value = TRUE)
-    cat("Variables monetarias identificadas para rankeo deflactario:", length(cols_monetarias), "\n")
-
-    cat("Generando ranks intra-mes por signo...\n")
-    for (vm in cols_monetarias) {
-        dataset[, paste0(vm, "_rk") := rankear_por_signo(get(vm)), by = foto_mes]
-    }
-
-    # 7. Deltas sobre variables rankeadas (Salto de Percentiles)
-    cat("Calculando deltas percentilares (Delta Rank 1 y 2)...\n")
-    cols_rk <- paste0(cols_monetarias, "_rk")
-    cols_rk_lag1 <- paste0(cols_rk, "_lag1")
-    cols_rk_lag2 <- paste0(cols_rk, "_lag2")
-
-    dataset[, (cols_rk_lag1) := shift(.SD, n = 1L, type = "lag"), by = numero_de_cliente, .SDcols = cols_rk]
-    dataset[, (cols_rk_lag2) := shift(.SD, n = 2L, type = "lag"), by = numero_de_cliente, .SDcols = cols_rk]
-
-    for (vrk in cols_rk) {
-        dataset[, paste0(vrk, "_delta1") := get(vrk) - get(paste0(vrk, "_lag1"))]
-        dataset[, paste0(vrk, "_delta2") := get(vrk) - get(paste0(vrk, "_lag2"))]
-    }
-
-    # 8. Limpieza de columnas auxiliares para optimizar RAM
-    dataset[, (c(cols_rk_lag1, cols_rk_lag2)) := NULL]
-
-    # ============================================================
-    # 5.1 FEATURE ENGINEERING: RATIOS DE NEGOCIO Y RETENCIÓN
-    # ============================================================
-
-    cat("\n--- CONSTRUCCIÓN DE RATIOS DE NEGOCIO Y RETENCIÓN ---\n")
-
-    # Función auxiliar de división segura (evita ceros, negativos en denominador e Infinitos)
+    # 4. Ratios estructurales intra-mes
     division_segura <- function(num, den, epsilon = 1.0) {
         den_ajustado <- pmax(den, epsilon, na.rm = FALSE)
         res <- num / den_ajustado
@@ -399,25 +345,53 @@ if (!file.exists(archivo_rds_fe)) {
         return(res)
     }
 
-    # 1. Ratios Estructurales de Negocio (Intra-mes)
-    cat("Calculando ratios estructurales de tarjetas y liquidez...\n")
-
     if ("tarjetas_msaldototal" %in% names(dataset) & "tarjetas_mlimitecompra" %in% names(dataset)) {
         dataset[, ratio_tarjeta_utilizacion := division_segura(tarjetas_msaldototal, tarjetas_mlimitecompra)]
         dataset[, ratio_tarjeta_consumo_limite := division_segura(tarjetas_mconsumototal, tarjetas_mlimitecompra)]
     }
-
     if ("tarjetas_mconsumototal" %in% names(dataset) & "mcuentas_saldo" %in% names(dataset)) {
         dataset[, ratio_consumo_sobre_saldo := division_segura(tarjetas_mconsumototal, mcuentas_saldo)]
     }
-
     if ("mpayroll" %in% names(dataset) & "mcuentas_saldo" %in% names(dataset)) {
         dataset[, ratio_payroll_sobre_saldo := division_segura(mpayroll, mcuentas_saldo)]
     }
 
-    # 2. Ratios Longitudinales de Retención (Mes actual vs Lag 1)
-    cat("Calculando ratios longitudinales de retención (Mes actual vs Lag 1)...\n")
+    cat("\n--- FIN ETAPA ETL ---\n\n")
 
+    # ============================================================
+    # 5. FEATURE ENGINEERING HISTÓRICO: LAGS 1-2 Y DELTAS 1-2
+    # ============================================================
+
+    cat("\n--- INICIO FEATURE ENGINEERING LONGITUDINAL (OPCIÓN 1: ORIGINALES + LAGS/DELTAS) ---\n")
+    tiempo_fe_inicio <- Sys.time()
+
+    # 1. Asegurar orden cronológico estricto por cliente y mes
+    setorder(dataset, numero_de_cliente, foto_mes)
+
+    # 2. Selección de todas las variables numéricas predictoras (incluyendo las 154 originales)
+    cols_excluir <- c("numero_de_cliente", "foto_mes", "clase_ternaria")
+    cols_lags <- setdiff(names(dataset), cols_excluir)
+    cols_lags <- cols_lags[vapply(dataset[, ..cols_lags], is.numeric, logical(1))]
+
+    cat("Variables base seleccionadas para lags y deltas:", length(cols_lags), "\n")
+
+    # 3. Construcción vectorizada de Rezagos (Lag 1 y Lag 2)
+    cat("Calculando Lag 1 y Lag 2...\n")
+    cols_lag1 <- paste0(cols_lags, "_lag1")
+    cols_lag2 <- paste0(cols_lags, "_lag2")
+
+    dataset[, (cols_lag1) := shift(.SD, n = 1L, type = "lag"), by = numero_de_cliente, .SDcols = cols_lags]
+    dataset[, (cols_lag2) := shift(.SD, n = 2L, type = "lag"), by = numero_de_cliente, .SDcols = cols_lags]
+
+    # 4. Construcción de Delta Lags (Delta 1 y Delta 2)
+    cat("Calculando Delta Lag 1 y Delta Lag 2...\n")
+    for (v in cols_lags) {
+        dataset[, paste0(v, "_delta1") := get(v) - get(paste0(v, "_lag1"))]
+        dataset[, paste0(v, "_delta2") := get(v) - get(paste0(v, "_lag2"))]
+    }
+
+    # 5. Ratios Longitudinales de Retención (Mes actual vs Lag 1)
+    cat("Calculando ratios longitudinales de retención (Mes actual vs Lag 1)...\n")
     dataset[, ratio_retencion_saldo_mcuentas := fifelse(
         mcuentas_saldo_lag1 > 0 & mcuentas_saldo >= 0,
         division_segura(mcuentas_saldo, mcuentas_saldo_lag1),
@@ -443,69 +417,58 @@ if (!file.exists(archivo_rds_fe)) {
     tiempo_fe_fin <- Sys.time()
     cat("Tiempo insumido en Feature Engineering:", round(difftime(tiempo_fe_fin, tiempo_fe_inicio, units = "mins"), 2), "minutos\n")
 
-    # 9. Auditoría dimensional y control de memoria
+    # 6. Auditoría dimensional y control de memoria
     memoria_gb <- round(as.numeric(object.size(dataset)) / (1024^3), 2)
-    cat("\n--- AUDITORÍA POST FEATURE ENGINEERING ---\n")
+    cat("\n--- AUDITORÍA POST FEATURE ENGINEERING (OPCIÓN 1) ---\n")
     cat("Dimensiones finales del dataset:", nrow(dataset), "filas x", ncol(dataset), "columnas\n")
     cat("Memoria RAM ocupada por el dataset:", memoria_gb, "GB\n")
-
-    # Verificación de integridad temporal en mes de entrenamiento (202106) y predicción (202108)
-    cat("Registros en 202106 (Train):", nrow(dataset[foto_mes == 202106]), "\n")
-    cat("Registros en 202108 (Test/Future):", nrow(dataset[foto_mes == 202108]), "\n")
-    cat("Completitud lag1 en 202106:", round(mean(!is.na(dataset[foto_mes == 202106, mcuentas_saldo_lag1])) * 100, 2), "%\n")
-    cat("Completitud lag1 en 202108:", round(mean(!is.na(dataset[foto_mes == 202108, mcuentas_saldo_lag1])) * 100, 2), "%\n")
     cat("\n--- FIN ETAPA FEATURE ENGINEERING ---\n\n")
 
     # ============================================================
-    # 6. PARTICIONES, FOLDS ESTRATIFICADOS Y FUNCIÓN GANANCIA
+    # 6. PARTICIONES TEMPORALES (CLASE 8) Y FUNCIÓN GANANCIA
     # ============================================================
 
-    cat("\n--- PREPARACIÓN PARA MODELADO Y VALIDACIÓN CRUZADA ---\n")
+    cat("\n--- PREPARACIÓN DE PARTICIONES TEMPORALES (FLUJO CLASE 8) ---\n")
 
     # 1. Definición de campos predictores (excluyendo identificadores y metas)
-    cols_excluir_modelo <- c("numero_de_cliente", "foto_mes", "clase_ternaria", "clase01")
+    cols_excluir_modelo <- c("numero_de_cliente", "foto_mes", "clase_ternaria", "clase01", "target_binario")
     campos_buenos <- setdiff(names(dataset), cols_excluir_modelo)
     cat("Cantidad de features predictoras finales:", length(campos_buenos), "\n")
 
-    # 2. Partición de Entrenamiento (foto_mes == 202106)
-    cat("Generando partición de entrenamiento (202106)...\n")
-    df_train <- dataset[foto_mes == 202106, c("numero_de_cliente", "foto_mes", "clase_ternaria", campos_buenos), with = FALSE]
+    # 2. Partición Histórica con Clase Completa (202103, 202104, 202105, 202106)
+    meses_hist <- sort(unique(c(PARAM$train_bo, PARAM$val_bo, PARAM$train_final)))
+    cat("Guardando meses históricos con clase completa:", paste(meses_hist, collapse = ", "), "\n")
+    df_train <- dataset[
+        foto_mes %in% meses_hist,
+        c("numero_de_cliente", "foto_mes", "clase_ternaria", campos_buenos),
+        with = FALSE
+    ]
     df_train[, clase01 := fifelse(clase_ternaria == "BAJA+2", 1L, 0L)]
 
     # 3. Partición Futuro / Scoring (foto_mes == 202108)
-    cat("Generando partición de evaluación futura (202108)...\n")
-    df_future <- dataset[foto_mes == 202108, c("numero_de_cliente", "foto_mes", campos_buenos), with = FALSE]
+    cat("Generando partición de evaluación futura (", PARAM$future, ")...\n", sep = "")
+    df_future <- dataset[
+        foto_mes == PARAM$future,
+        c("numero_de_cliente", "foto_mes", campos_buenos),
+        with = FALSE
+    ]
 
-    # 4. Liberación de memoria eliminando meses históricos ya procesados
-    cat("Liberando memoria RAM de meses intermedios...\n")
+    # 4. Liberación de memoria eliminando el dataset completo (incluyendo 202107)
+    cat("Liberando memoria RAM del dataset crudo...\n")
     rm(dataset)
     invisible(gc())
-    cat("Memoria RAM liberada. Columnas listas para entrenamiento.\n")
 
-    # 5. Asignación de 5 Folds Estratificados sobre 202106
-    cat("Asignando 5 Folds estratificados con semilla primigenia (333331)...\n")
-    set.seed(333331)
-    k_folds <- 5L
-    df_train[, fold := 0L]
+    cat("Distribución de clase_ternaria por mes en df_train:\n")
+    print(dcast(df_train, foto_mes ~ clase_ternaria, fun.aggregate = length, value.var = "numero_de_cliente"))
 
-    # Estratificación exacta para balancear BAJA+2 en cada fold
-    idx_pos <- which(df_train$clase01 == 1L)
-    idx_neg <- which(df_train$clase01 == 0L)
-
-    df_train[idx_pos, fold := sample(rep(1:k_folds, length.out = length(idx_pos)))]
-    df_train[idx_neg, fold := sample(rep(1:k_folds, length.out = length(idx_neg)))]
-
-    cat("Distribución de target (clase01) por Fold en 202106:\n")
-    print(table(Fold = df_train$fold, Target = df_train$clase01))
-
-    # Guardar para no volver a correr nunca más los 14 minutos de FE
-    cat("\nGuardando particiones procesadas en:", archivo_rds_fe, "\n")
+    # Guardar para no volver a correr el FE en próximas corridas de Opción 1
+    cat("\nGuardando particiones Clase 8 (Opción 1) en:", archivo_rds_fe, "\n")
     saveRDS(
         list(df_train = df_train, df_future = df_future, campos_buenos = campos_buenos),
         file = archivo_rds_fe
     )
 } else {
-    cat("\n--- CARGANDO PARTICIONES PRE-PROCESADAS DESDE DISCO (.RDS) ---\n")
+    cat("\n--- CARGANDO PARTICIONES CLASE 8 (OPCIÓN 1) DESDE DISCO (.RDS) ---\n")
     objs <- readRDS(archivo_rds_fe)
     df_train <- objs$df_train
     df_future <- objs$df_future
@@ -515,452 +478,790 @@ if (!file.exists(archivo_rds_fe)) {
     cat("Particiones cargadas en memoria en segundos.\n")
 }
 
-# Variables y funciones globales (siempre disponibles aunque cargue desde .rds)
 if (!exists("tiempo_fe_inicio")) tiempo_fe_inicio <- Sys.time()
-k_folds <- 5L
 
 # ============================================================
-# TARGET DE ENTRENAMIENTO SEGUN EXPERIMENTO
+# TARGET DE ENTRENAMIENTO Y FUNCIONES DE EVALUACIÓN EN 202106
 # ============================================================
-# La ganancia se evalua SIEMPRE con BAJA+2 real (target_eval);
-# solo cambia la etiqueta con la que aprende LightGBM (target_entreno).
-target_eval <- df_train$clase01
-target_entreno <- if (PARAM$target == "baja12") {
-    as.integer(df_train$clase_ternaria %in% c("BAJA+1", "BAJA+2"))
+# La ganancia se evalúa SIEMPRE con BAJA+2 real (clase01);
+# LightGBM entrena con target_binario (POS = {BAJA+1, BAJA+2} si target == "baja12").
+df_train[, clase01 := fifelse(clase_ternaria == "BAJA+2", 1L, 0L)]
+df_train[, target_binario := if (PARAM$target == "baja12") {
+    as.integer(clase_ternaria %in% c("BAJA+1", "BAJA+2"))
 } else {
-    df_train$clase01
-}
-cat("Target de entrenamiento:", PARAM$target, "- positivos:", sum(target_entreno), "\n")
+    clase01
+}]
 
-# 6. Función de Ganancia de Negocio Oficial
-# Ganancia = TP * $1.072.500 - FP * $27.500
-calcular_ganancia_maxima <- function(probs, target_real) {
-    dt_eval <- data.table(p = probs, y = target_real)
+cat("Resumen de particiones activas:\n")
+cat("  - Train BO (", paste(PARAM$train_bo, collapse = "+"), "): ",
+    nrow(df_train[foto_mes %in% PARAM$train_bo]), " filas | POS = ",
+    sum(df_train[foto_mes %in% PARAM$train_bo, target_binario]), "\n",
+    sep = ""
+)
+cat("  - Val BO   (", PARAM$val_bo, "): ",
+    nrow(df_train[foto_mes == PARAM$val_bo]), " filas | BAJA+2 reales = ",
+    sum(df_train[foto_mes == PARAM$val_bo, clase01]), "\n",
+    sep = ""
+)
+cat("  - Train Final Producción (", paste(PARAM$train_final, collapse = "+"), "): ",
+    nrow(df_train[foto_mes %in% PARAM$train_final]), " filas | POS = ",
+    sum(df_train[foto_mes %in% PARAM$train_final, target_binario]), "\n",
+    sep = ""
+)
+cat("  - Future Scoring (", PARAM$future, "): ", nrow(df_future), " filas\n", sep = "")
+
+# Función de evaluación integral sobre el mes de validación (202106):
+# Devuelve ganancia suavizada (ventana centrada de 501 envíos = +-250),
+# ganancia máxima cruda, corte óptimo, ganancia en corte fijo (11.000) y AUC.
+evaluar_validacion <- function(probs, target_baja2_real, corte_fijo = PARAM$corte_final) {
+    dt_eval <- data.table(p = probs, y = target_baja2_real)
     setorder(dt_eval, -p)
 
-    # Ganancia acumulada cliente por cliente
     dt_eval[, ganancia_acum := cumsum(fifelse(y == 1L, 1072500, -27500))]
+    dt_eval[, ganancia_suave := frollmean(ganancia_acum, n = 501L, align = "center", na.rm = TRUE)]
 
-    idx_max <- which.max(dt_eval$ganancia_acum)
-    ganancia_max <- dt_eval$ganancia_acum[idx_max]
-    corte_optimo_envios <- idx_max
-    prob_corte <- dt_eval$p[idx_max]
+    idx_suave <- which.max(dt_eval$ganancia_suave)
+    gan_suave_max <- dt_eval$ganancia_suave[idx_suave]
+    envios_opt_suave <- idx_suave
+    prob_corte_suave <- dt_eval$p[idx_suave]
+
+    idx_crudo <- which.max(dt_eval$ganancia_acum)
+    gan_cruda_max <- dt_eval$ganancia_acum[idx_crudo]
+
+    gan_corte_fijo <- dt_eval$ganancia_acum[corte_fijo]
+
+    # Cálculo rápido de AUC por Mann-Whitney (rangos)
+    r <- frank(dt_eval$p, ties.method = "average")
+    n_pos <- as.numeric(sum(dt_eval$y == 1L))
+    n_neg <- as.numeric(sum(dt_eval$y == 0L))
+    auc_val <- (sum(r[dt_eval$y == 1L]) - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
 
     return(list(
-        ganancia = ganancia_max,
-        envios_optimos = corte_optimo_envios,
-        probabilidad_corte = prob_corte
+        ganancia_suavizada = gan_suave_max,
+        ganancia_max       = gan_cruda_max,
+        envios_optimos     = envios_opt_suave,
+        prob_corte         = prob_corte_suave,
+        gan_c11000         = gan_corte_fijo,
+        auc                = auc_val
     ))
 }
 
-# Ganancia en un corte fijo de envios (comparacion justa entre experimentos:
-# el maximo de la curva elige el corte a posteriori y es optimista)
-ganancia_en_corte <- function(probs, target_real, corte = 11000L) {
-    y_top <- target_real[order(-probs)][1:corte]
-    sum(fifelse(y_top == 1L, 1072500, -27500))
-}
-
-cat("Estructura de validación cruzada y función de ganancia listas.\n")
+cat("Particiones temporales y función de ganancia suavizada listas.\n")
 
 # ============================================================
-# 7. OPTIMIZACIÓN DE HIPERPARÁMETROS NOCTURNA (5-FOLD CV)
+# 7. OPTIMIZACIÓN BAYESIANA DE HIPERPARÁMETROS (CLASE 8 - 3 HPs)
 # ============================================================
+# Desarrollo: Entrena en 202103 + 202104 (gap = 202105) y valida en 202106
+# Maximiza Ganancia Suavizada (ventana centrada de 501 envíos = +-250)
 
-# 1. Objetos base obligatorios para el Bloque 7 y Bloque 8
-cat("\nConstruyendo matriz numérica de entrenamiento...\n")
-mat_train <- as.matrix(df_train[, ..campos_buenos])
 archivo_ht <- file.path(dir_exp, "HT_resultados.csv")
+archivo_bo <- file.path(dir_exp, "bayesiana.RDATA")
+archivo_log <- file.path(dir_exp, "BO_log.txt")
+archivo_pred_val <- file.path(dir_exp, "predicciones_val_202106_champion.csv")
 
-# Modo de busqueda definido en PARAM (ver CONFIGURACION DEL EXPERIMENTO)
-correr_ht_nocturno <- PARAM$modo_ht != "ninguno"
+idx_bo_val <- which(df_train$foto_mes == PARAM$val_bo)
+target_val_baja2 <- df_train$clase01[idx_bo_val]
+clase_ternaria_val <- df_train$clase_ternaria[idx_bo_val]
 
-if (correr_ht_nocturno) {
-    cat("\n--- INICIO DE OPTIMIZACIÓN DE HIPERPARÁMETROS (HT) ---\n")
+correr_ht <- PARAM$modo_ht != "ninguno"
+
+if (correr_ht) {
+    cat("\n--- INICIO DE OPTIMIZACIÓN DE HIPERPARÁMETROS (MODO:", PARAM$modo_ht, ") ---\n")
     tiempo_ht_inicio <- Sys.time()
 
-    # 2. Pre-construcción de datasets LightGBM para los 5 Folds (Aceleración masiva)
-    cat("Pre-construyendo matrices lgb.Dataset para los 5 folds...\n")
-    folds_datasets <- vector("list", k_folds)
+    # 1. Filtrar mes(es) de entrenamiento de la BO (202103 + 202104) y eventual undersampling
+    set.seed(PARAM$semillas[1])
+    idx_bo_train <- which(
+        df_train$foto_mes %in% PARAM$train_bo &
+            (df_train$clase_ternaria %in% c("BAJA+1", "BAJA+2") | runif(nrow(df_train)) <= PARAM$undersampling)
+    )
 
-    for (k in 1:k_folds) {
-        idx_tr <- which(df_train$fold != k)
-        folds_datasets[[k]] <- lgb.Dataset(
-            data = mat_train[idx_tr, ],
-            label = target_entreno[idx_tr],
-            params = list(max_bin = PARAM$max_bin, feature_pre_filter = FALSE),
-            free_raw_data = FALSE
-        )
-    }
-    cat("Datasets de 5 folds pre-cargados en C++ exitosamente.\n")
+    cat(sprintf(
+        "Construyendo dtrain_bo (%s: %d filas) y mat_val_bo (%s: %d filas)...\n",
+        paste(PARAM$train_bo, collapse = "+"), length(idx_bo_train),
+        PARAM$val_bo, length(idx_bo_val)
+    ))
 
-    # 3. Configuración del archivo de salida incremental
-    if (!file.exists(archivo_ht)) {
+    dtrain_bo <- lgb.Dataset(
+        data = data.matrix(df_train[idx_bo_train, ..campos_buenos]),
+        label = df_train$target_binario[idx_bo_train],
+        params = list(max_bin = PARAM$max_bin, feature_pre_filter = FALSE),
+        free_raw_data = FALSE
+    )
+    # Pre-construir el lgb.Dataset en C++ una sola vez antes de arrancar la BO
+    lgb.Dataset.construct(dtrain_bo)
+
+    mat_val_bo <- data.matrix(df_train[idx_bo_val, ..campos_buenos])
+
+    # 2. Inicializar archivo incremental HT_resultados.csv
+    GLOBAL_iteracion <- 0L
+    GLOBAL_mejor_gan <- -Inf
+
+    if (file.exists(archivo_ht)) {
+        tb_prev <- fread(archivo_ht)
+        if (nrow(tb_prev) > 0) {
+            GLOBAL_iteracion <- nrow(tb_prev)
+            GLOBAL_mejor_gan <- max(tb_prev$ganancia_suavizada, na.rm = TRUE)
+        }
+        rm(tb_prev)
+    } else {
         tb_encabezado <- data.table(
-            iteracion = integer(),
-            ganancia_max = numeric(),
-            envios_optimos = integer(),
-            prob_corte = numeric(),
-            semilla = integer(),
-            gan_c11000 = numeric(),
-            num_leaves = integer(),
-            min_data_in_leaf = integer(),
-            feature_fraction = numeric(),
-            learning_rate = numeric(),
-            num_iterations = integer(),
-            tiempo_seg = numeric()
+            iteracion               = integer(),
+            ganancia_suavizada      = numeric(),
+            ganancia_max            = numeric(),
+            gan_c11000              = numeric(),
+            auc                     = numeric(),
+            envios_optimos          = integer(),
+            prob_corte              = numeric(),
+            semilla                 = integer(),
+            num_iterations          = integer(),
+            num_leaves              = integer(),
+            min_sum_hessian_in_leaf = numeric(),
+            min_data_in_leaf        = integer(),
+            feature_fraction        = numeric(),
+            learning_rate           = numeric(),
+            tiempo_seg              = numeric()
         )
         fwrite(tb_encabezado, file = archivo_ht)
     }
 
-    # 4. Parámetros de ejecución nocturna
-    n_iteraciones <- if (PARAM$modo_ht == "fijos") PARAM$n_semillas_cv else PARAM$n_iteraciones
-    mejor_ganancia_global <- -Inf
-
-    cat(sprintf("Iniciando búsqueda de %d iteraciones. Resultados se grabarán en: %s\n\n", n_iteraciones, archivo_ht))
-
-    # 5. Bucle de Optimización Nocturna
-    set.seed(333331)
-
-    for (i in 1:n_iteraciones) {
+    # 3. Función objetivo para evaluar un set de hiperparámetros en 202106
+    EstimarGanancia_lightgbm <- function(x) {
         t_iter_inicio <- Sys.time()
+        GLOBAL_iteracion <<- GLOBAL_iteracion + 1L
 
-        # Generación de hiperparámetros candidatos (o fijos x semilla)
-        if (PARAM$modo_ht == "fijos") {
-            p_num_leaves <- PARAM$hp_fijos$num_leaves
-            p_min_data_in_leaf <- PARAM$hp_fijos$min_data_in_leaf
-            p_feature_fraction <- PARAM$hp_fijos$feature_fraction
-            p_learning_rate <- PARAM$hp_fijos$learning_rate
-            p_num_iterations <- PARAM$hp_fijos$num_iterations
-            p_semilla <- PARAM$semillas[i]
-        } else {
-            # Rangos ampliados en exp04: el champion de exp01 quedo en el borde
-            # (num_leaves = 16 minimo, min_data_in_leaf = 800 maximo de la grilla anterior)
-            p_num_leaves <- sample(c(8L, 12L, 16L, 24L, 31L, 48L, 64L), 1)
-            p_min_data_in_leaf <- sample(c(400L, 600L, 800L, 1000L, 1300L, 1600L, 2000L), 1)
-            p_feature_fraction <- round(runif(1, 0.15, 0.50), 4)
-            p_learning_rate <- round(runif(1, 0.010, 0.035), 4)
-            p_num_iterations <- sample(c(450L, 550L, 700L, 850L, 1000L), 1)
-            p_semilla <- NA_integer_
-        }
+        p_num_iterations <- as.integer(x$num_iterations)
+        p_num_leaves <- as.integer(x$num_leaves)
+        p_min_sum_hessian_in_leaf <- as.numeric(x$min_sum_hessian_in_leaf)
+        p_min_data_in_leaf <- as.integer(PARAM$lgbm_fijos$min_data_in_leaf)
+        p_feature_fraction <- as.numeric(PARAM$lgbm_fijos$feature_fraction)
+        p_learning_rate <- as.numeric(PARAM$lgbm_fijos$learning_rate)
+        p_semilla <- if (!is.null(x$seed)) as.integer(x$seed) else PARAM$semillas[1]
 
         param_lgb <- list(
-            objective = "binary",
-            metric = "none",
-            boosting = "gbdt",
-            learning_rate = p_learning_rate,
-            num_leaves = p_num_leaves,
-            min_data_in_leaf = p_min_data_in_leaf,
-            feature_fraction = p_feature_fraction,
-            feature_pre_filter = FALSE,
-            verbosity = -1,
-            num_threads = parallel::detectCores()
+            objective               = "binary",
+            metric                  = "none",
+            boosting                = "gbdt",
+            first_metric_only       = TRUE,
+            boost_from_average      = TRUE,
+            feature_pre_filter      = FALSE,
+            force_row_wise          = TRUE,
+            verbosity               = -100L,
+            max_depth               = -1L,
+            min_gain_to_split       = 0.0,
+            lambda_l1               = 0.0,
+            lambda_l2               = 0.0,
+            max_bin                 = PARAM$max_bin,
+            learning_rate           = p_learning_rate,
+            feature_fraction        = p_feature_fraction,
+            min_data_in_leaf        = p_min_data_in_leaf,
+            num_leaves              = p_num_leaves,
+            min_sum_hessian_in_leaf = p_min_sum_hessian_in_leaf,
+            seed                    = p_semilla,
+            num_threads             = parallel::detectCores()
         )
-        # La semilla de LightGBM solo se fija en modo "fijos" (en "busqueda" se
-        # mantiene el comportamiento de exp01/exp02 para que sigan siendo reproducibles)
-        if (!is.na(p_semilla)) param_lgb$seed <- p_semilla
 
-        # Vector para recolectar predicciones Out-of-Fold (OOF) completas
-        pred_oof <- rep(0.0, nrow(df_train))
+        modelo_bo <- lgb.train(
+            params  = param_lgb,
+            data    = dtrain_bo,
+            nrounds = p_num_iterations,
+            verbose = -100
+        )
 
-        # Entrenamiento y validación sobre los 5 Folds
-        for (k in 1:k_folds) {
-            idx_val <- which(df_train$fold == k)
+        pred_val <- predict(modelo_bo, mat_val_bo)
+        rm(modelo_bo)
+        invisible(gc(full = FALSE, verbose = FALSE))
 
-            modelo_k <- lgb.train(
-                params = param_lgb,
-                data = folds_datasets[[k]],
-                nrounds = p_num_iterations,
-                verbose = -1
-            )
+        res_eval <- evaluar_validacion(pred_val, target_val_baja2, PARAM$corte_final)
+        duracion_seg <- round(as.numeric(difftime(Sys.time(), t_iter_inicio, units = "secs")), 1)
 
-            pred_oof[idx_val] <- predict(modelo_k, mat_train[idx_val, ])
-        }
-
-        # Evaluación de la ganancia sobre el 100% de las predicciones OOF de 202106
-        res_eval <- calcular_ganancia_maxima(pred_oof, target_eval)
-        t_iter_fin <- Sys.time()
-        duracion_seg <- round(as.numeric(difftime(t_iter_fin, t_iter_inicio, units = "secs")), 1)
-
-        # Registro inmediato en disco (append seguro a prueba de interrupciones)
         fila_resultado <- data.table(
-            iteracion = i,
-            ganancia_max = res_eval$ganancia,
-            envios_optimos = res_eval$envios_optimos,
-            prob_corte = round(res_eval$probabilidad_corte, 5),
-            semilla = p_semilla,
-            gan_c11000 = ganancia_en_corte(pred_oof, target_eval, 11000L),
-            num_leaves = p_num_leaves,
-            min_data_in_leaf = p_min_data_in_leaf,
-            feature_fraction = p_feature_fraction,
-            learning_rate = p_learning_rate,
-            num_iterations = p_num_iterations,
-            tiempo_seg = duracion_seg
+            iteracion               = GLOBAL_iteracion,
+            ganancia_suavizada      = round(res_eval$ganancia_suavizada),
+            ganancia_max            = res_eval$ganancia_max,
+            gan_c11000              = res_eval$gan_c11000,
+            auc                     = round(res_eval$auc, 6),
+            envios_optimos          = res_eval$envios_optimos,
+            prob_corte              = round(res_eval$prob_corte, 5),
+            semilla                 = p_semilla,
+            num_iterations          = p_num_iterations,
+            num_leaves              = p_num_leaves,
+            min_sum_hessian_in_leaf = p_min_sum_hessian_in_leaf,
+            min_data_in_leaf        = p_min_data_in_leaf,
+            feature_fraction        = p_feature_fraction,
+            learning_rate           = p_learning_rate,
+            tiempo_seg              = duracion_seg
         )
         fwrite(fila_resultado, file = archivo_ht, append = TRUE)
 
-        # Monitoreo en consola y log
-        if (res_eval$ganancia > mejor_ganancia_global) {
-            mejor_ganancia_global <- res_eval$ganancia
+        if (res_eval$ganancia_suavizada > GLOBAL_mejor_gan) {
+            GLOBAL_mejor_gan <<- res_eval$ganancia_suavizada
             marca_nuevo_max <- "--> NUEVO MÁXIMO!"
+            fwrite(
+                data.table(
+                    numero_de_cliente = df_train$numero_de_cliente[idx_bo_val],
+                    clase_ternaria    = clase_ternaria_val,
+                    clase01           = target_val_baja2,
+                    prob              = pred_val
+                ),
+                file = archivo_pred_val
+            )
         } else {
             marca_nuevo_max <- ""
         }
 
         cat(sprintf(
-            "[Iter %03d/%d - %3.0fs] Ganancia: $ %s | Envíos: %5d | Leaves: %3d | MinData: %4d | FeatFrac: %.3f | LR: %.4f %s\n",
-            i, n_iteraciones, duracion_seg,
-            format(res_eval$ganancia, big.mark = ".", scientific = FALSE),
-            res_eval$envios_optimos, p_num_leaves, p_min_data_in_leaf,
-            p_feature_fraction, p_learning_rate, marca_nuevo_max
+            "[BO %03d/%d - %4.0fs] GanSuave: $ %s | GanC11000: $ %s | AUC: %.4f | Envíos: %5d | Iters: %4d | Leaves: %4d | Hessian: %.6f %s\n",
+            GLOBAL_iteracion, PARAM$bo_iteraciones, duracion_seg,
+            format(round(res_eval$ganancia_suavizada), big.mark = ".", scientific = FALSE),
+            format(res_eval$gan_c11000, big.mark = ".", scientific = FALSE),
+            res_eval$auc, res_eval$envios_optimos,
+            p_num_iterations, p_num_leaves, p_min_sum_hessian_in_leaf, marca_nuevo_max
         ))
+
+        return(res_eval$ganancia_suavizada)
     }
+
+    if (PARAM$modo_ht == "bayesiana") {
+        configureMlr(show.learner.output = FALSE)
+
+        hs_bo <- makeParamSet(
+            makeIntegerParam("num_iterations",
+                lower = as.integer(PARAM$bo_bordes$num_iterations[1]),
+                upper = as.integer(PARAM$bo_bordes$num_iterations[2])
+            ),
+            makeIntegerParam("num_leaves",
+                lower = as.integer(PARAM$bo_bordes$num_leaves[1]),
+                upper = as.integer(PARAM$bo_bordes$num_leaves[2])
+            ),
+            makeNumericParam("min_sum_hessian_in_leaf",
+                lower = as.numeric(PARAM$bo_bordes$min_sum_hessian_in_leaf[1]),
+                upper = as.numeric(PARAM$bo_bordes$min_sum_hessian_in_leaf[2])
+            )
+        )
+
+        obj_fun <- makeSingleObjectiveFunction(
+            fn                   = EstimarGanancia_lightgbm,
+            minimize             = FALSE,
+            noisy                = TRUE,
+            par.set              = hs_bo,
+            has.simple.signature = FALSE
+        )
+
+        # Con k=3 HPs, mlrMBO corre 4*k = 12 puntos de initdesign y luego iters_infill iteraciones Kriging
+        iters_infill <- max(10L, as.integer(PARAM$bo_iteraciones) - 12L)
+
+        ctrl <- makeMBOControl(save.on.disk.at.time = 600, save.file.path = archivo_bo)
+        ctrl <- setMBOControlTermination(ctrl, iters = iters_infill)
+        ctrl <- setMBOControlInfill(ctrl, crit = makeMBOInfillCritEI())
+
+        surr_km <- makeLearner(
+            "regr.km",
+            predict.type = "se",
+            covtype      = "matern3_2",
+            control      = list(trace = FALSE)
+        )
+
+        set.seed(PARAM$semillas[1])
+        if (!file.exists(archivo_bo)) {
+            bayesiana_salida <- mbo(obj_fun, learner = surr_km, control = ctrl)
+        } else {
+            cat("Retomando Optimización Bayesiana desde:", archivo_bo, "\n")
+            bayesiana_salida <- mboContinue(archivo_bo)
+        }
+
+        tb_bayesiana <- as.data.table(bayesiana_salida$opt.path)
+        tb_bayesiana[, iter := .I]
+        setorder(tb_bayesiana, -y)
+        fwrite(tb_bayesiana, file = archivo_log, sep = "\t")
+    } else if (PARAM$modo_ht == "fijos") {
+        for (sem in PARAM$semillas[1:min(5L, length(PARAM$semillas))]) {
+            EstimarGanancia_lightgbm(c(PARAM$hp_fijos, list(seed = sem)))
+        }
+    }
+
+    # Liberar memoria de objetos exclusivos de la BO antes de Producción
+    rm(dtrain_bo, mat_val_bo)
+    invisible(gc())
 
     tiempo_ht_fin <- Sys.time()
     cat("\n--- OPTIMIZACIÓN FINALIZADA ---\n")
     cat("Tiempo total de búsqueda:", round(difftime(tiempo_ht_fin, tiempo_ht_inicio, units = "hours"), 2), "horas\n")
+} else {
+    cat("\nSalteando BO: se utilizan las iteraciones ya guardadas en", archivo_ht, "\n")
+}
 
-    if (PARAM$modo_ht == "fijos") {
-        tb_fijos <- fread(archivo_ht)
-        cat("\n--- RESUMEN MULTISEMILLA EN CV (202106) ---\n")
-        cat(sprintf(
-            "Ganancia c11000 -> media: $ %s | SD: $ %s\n",
-            format(round(mean(tb_fijos$gan_c11000)), big.mark = "."),
-            format(round(sd(tb_fijos$gan_c11000)), big.mark = ".")
+# ============================================================
+# 7.1 TABLA DE CONTINGENCIA (VP/FP/FN/VN) Y GRÁFICOS DE VALIDACIÓN (202106)
+# ============================================================
+
+tb_resultados_ht <- fread(archivo_ht)
+
+if (file.exists(archivo_pred_val)) {
+    cat("\n--- AUDITORÍA DE CLASIFICACIÓN Y TABLA DE CONTINGENCIA EN VALIDACIÓN (", PARAM$val_bo, ") ---\n", sep = "")
+    dt_val_champ <- fread(archivo_pred_val)
+    setorder(dt_val_champ, -prob)
+    dt_val_champ[, envio := .I]
+    dt_val_champ[, ganancia_acum := cumsum(fifelse(clase01 == 1L, 1072500, -27500))]
+    dt_val_champ[, ganancia_suave := frollmean(ganancia_acum, n = 501L, align = "center", na.rm = TRUE)]
+
+    corte_opt_suave <- which.max(dt_val_champ$ganancia_suave)
+    cortes_auditoria <- unique(c(PARAM$corte_final, corte_opt_suave))
+
+    for (c_eval in cortes_auditoria) {
+        etiqueta_corte <- if (c_eval == PARAM$corte_final) "CORTE FIJO" else "CORTE ÓPTIMO SUAVIZADO"
+        dt_val_champ[, pred_pos := fifelse(envio <= c_eval, 1L, 0L)]
+
+        VP <- sum(dt_val_champ$pred_pos == 1L & dt_val_champ$clase01 == 1L)
+        FP <- sum(dt_val_champ$pred_pos == 1L & dt_val_champ$clase01 == 0L)
+        FN <- sum(dt_val_champ$pred_pos == 0L & dt_val_champ$clase01 == 1L)
+        VN <- sum(dt_val_champ$pred_pos == 0L & dt_val_champ$clase01 == 0L)
+
+        sensibilidad <- VP / (VP + FN)
+        especificidad <- VN / (VN + FP)
+        vpp_precision <- VP / (VP + FP)
+        vpn <- VN / (VN + FN)
+        prevalencia <- (VP + FN) / nrow(dt_val_champ)
+        lift_corte <- vpp_precision / prevalencia
+        gan_neta <- VP * 1072500 - FP * 27500
+
+        cat(sprintf("\n>>> %s: %d ENVÍOS (Prob. corte = %.5f) <<<\n", etiqueta_corte, c_eval, dt_val_champ$prob[c_eval]))
+        cat("1. Matriz de Confusión Binaria (Target Real = BAJA+2):\n")
+        mat_conf <- matrix(
+            c(VP, FP, FN, VN),
+            nrow = 2, byrow = TRUE,
+            dimnames = list(
+                "Predicho" = c("Enviar Estímulo (1)", "No Enviar (0)"),
+                "Real_BAJA2" = c("BAJA+2 (Positivo)", "No BAJA+2 (Negativo)")
+            )
+        )
+        print(mat_conf)
+
+        cat("\n2. Desglose por Clase Ternaria Real:\n")
+        print(table(
+            Predicho = ifelse(dt_val_champ$pred_pos == 1L, "1_Enviar", "0_No_Enviar"),
+            Clase_Ternaria = dt_val_champ$clase_ternaria
         ))
+
         cat(sprintf(
-            "Ganancia maxima -> media: $ %s | SD: $ %s\n",
-            format(round(mean(tb_fijos$ganancia_max)), big.mark = "."),
-            format(round(sd(tb_fijos$ganancia_max)), big.mark = ".")
+            "\n3. Métricas Epidemiológicas / Negocio en %d envíos:\n   - VP (BAJA+2 capturados): %d de %d (Sensibilidad / Recall = %.2f%%)\n   - FP (Envíos sin BAJA+2): %d (Especificidad = %.2f%%)\n   - VPP (Precisión en el corte): %.2f%% (Prevalencia basal = %.2f%% -> Lift = %.2fx)\n   - VPN: %.4f%%\n   - Ganancia Neta Cruda: $ %s | Ganancia Suavizada (+-250): $ %s\n",
+            c_eval, VP, VP + FN, sensibilidad * 100,
+            FP, especificidad * 100,
+            vpp_precision * 100, prevalencia * 100, lift_corte,
+            vpn * 100,
+            format(gan_neta, big.mark = ".", scientific = FALSE),
+            format(round(dt_val_champ$ganancia_suave[c_eval]), big.mark = ".", scientific = FALSE)
         ))
     }
-} else {
-    cat("\nSalteando bucle HT nocturno: se utilizan las iteraciones ya guardadas en", archivo_ht, "\n")
+
+    # Gráfico 1: Curva de Ganancia Acumulada (Cruda vs Suavizada) en 202106 (0 a 25.000 envíos)
+    dt_curva <- dt_val_champ[envio <= 25000L]
+    p_curva_gan <- ggplot(dt_curva, aes(x = envio)) +
+        geom_line(aes(y = ganancia_acum / 1e6, color = "Ganancia Cruda"), alpha = 0.45, linewidth = 0.6) +
+        geom_line(aes(y = ganancia_suave / 1e6, color = "Ganancia Suavizada (+-250)"), linewidth = 1.1, na.rm = TRUE) +
+        geom_vline(xintercept = PARAM$corte_final, linetype = "dashed", color = "firebrick", linewidth = 0.8) +
+        geom_vline(xintercept = corte_opt_suave, linetype = "dotted", color = "darkgreen", linewidth = 0.8) +
+        scale_color_manual(values = c("Ganancia Cruda" = "steelblue", "Ganancia Suavizada (+-250)" = "navy")) +
+        labs(
+            title = paste0("Curva de Ganancia en Validación (", PARAM$val_bo, ") - Modelo Champion BO"),
+            subtitle = sprintf(
+                "Max Suavizada: $ %s M (en %d envíos) | Corte %d: $ %s M",
+                format(round(max(dt_curva$ganancia_suave, na.rm = TRUE) / 1e6, 2), nsmall = 2),
+                corte_opt_suave, PARAM$corte_final,
+                format(round(dt_val_champ$ganancia_acum[PARAM$corte_final] / 1e6, 2), nsmall = 2)
+            ),
+            x = "Cantidad de Envíos (ordenados por probabilidad descendente)",
+            y = "Ganancia Acumulada (Millones ARS)",
+            color = "Curva"
+        ) +
+        theme_minimal(base_size = 11) +
+        theme(legend.position = "top")
+
+    ggsave(file.path(dir_exp, "plots/bo_curva_ganancia_202106.png"), p_curva_gan, width = 10, height = 6, dpi = 300)
+    cat("\nGráfico de curva de ganancia guardado en:", file.path(dir_exp, "plots/bo_curva_ganancia_202106.png"), "\n")
+    rm(dt_val_champ, dt_curva)
 }
 
-# ============================================================
-# 8. SELECCIÓN DE CHAMPION, REENTRENAMIENTO Y FEATURE IMPORTANCE
-# ============================================================
+if (nrow(tb_resultados_ht) > 1) {
+    tb_resultados_ht[, mejor_acum := cummax(ganancia_suavizada)]
+    tb_resultados_ht[, etapa_bo := fifelse(iteracion <= 12L, "1_InitDesign (Azar)", "2_Kriging (Inteligente)")]
 
-cat("\n--- SELECCIÓN DEL MEJOR MODELO Y REENTRENAMIENTO FINAL ---\n")
+    # Gráfico 2: Evolución de las iteraciones de la Optimización Bayesiana
+    p_bo_evol <- ggplot(tb_resultados_ht, aes(x = iteracion)) +
+        geom_vline(xintercept = 12.5, linetype = "dashed", color = "gray40") +
+        geom_point(aes(y = ganancia_suavizada / 1e6, color = etapa_bo), size = 2.5, alpha = 0.85) +
+        geom_line(aes(y = mejor_acum / 1e6), color = "firebrick", linewidth = 1.0) +
+        labs(
+            title = "Convergencia de la Optimización Bayesiana (50 Iteraciones)",
+            subtitle = "Puntos: Ganancia Suavizada por iteración | Línea roja: Máximo acumulado",
+            x = "Iteración de la BO (1-12 = InitDesign, 13-50 = Kriging EI)",
+            y = "Ganancia Suavizada en 202106 (Millones ARS)",
+            color = "Fase BO"
+        ) +
+        theme_minimal(base_size = 11) +
+        theme(legend.position = "top")
 
-# 1. Cargar historial de optimización y seleccionar el mejor set
-tb_resultados_ht <- fread(archivo_ht)
-idx_mejor <- which.max(tb_resultados_ht$ganancia_max)
+    ggsave(file.path(dir_exp, "plots/bo_evolucion_iteraciones.png"), p_bo_evol, width = 10, height = 6, dpi = 300)
+
+    # Gráfico 3: Paisaje de los 3 Hiperparámetros explorados
+    p_bo_hp <- ggplot(tb_resultados_ht, aes(
+        x = num_leaves,
+        y = log10(min_sum_hessian_in_leaf),
+        color = ganancia_suavizada / 1e6,
+        size = num_iterations
+    )) +
+        geom_point(alpha = 0.8) +
+        scale_color_viridis_c(option = "plasma", name = "Ganancia Suave (M)") +
+        labs(
+            title = "Espacio de Hiperparámetros Explorado (Receta Frugal 3 HPs)",
+            x = "num_leaves",
+            y = "log10(min_sum_hessian_in_leaf)",
+            size = "num_iterations"
+        ) +
+        theme_minimal(base_size = 11)
+
+    ggsave(file.path(dir_exp, "plots/bo_paisaje_hiperparametros.png"), p_bo_hp, width = 9, height = 6, dpi = 300)
+    cat("Gráficos diagnósticos de la BO guardados en:", file.path(dir_exp, "plots"), "\n")
+}
+
+# ==============================================================================
+# 8. PRODUCCIÓN FINAL CLASE 8: ENTRENAMIENTO EN 4 MESES (202103..202106)
+#    + IMPORTANCIA DE VARIABLES + ENSAMBLE DE 100 SEMILLAS SOBRE 202108
+# ==============================================================================
+
+n_sem_total <- length(PARAM$semillas)
+
+# 1. Seleccionar el Champion por Ganancia Suavizada en 202106
+idx_mejor <- which.max(tb_resultados_ht$ganancia_suavizada)
 mejor_registro <- tb_resultados_ht[idx_mejor]
 
-cat("\n=== HIPERPARÁMETROS GANADORES (CHAMPION) ===\n")
-cat("Iteración seleccionada:", mejor_registro$iteracion, "\n")
-cat("Ganancia estimada en CV: $", format(mejor_registro$ganancia_max, big.mark = ".", scientific = FALSE), "\n")
-cat("Corte óptimo de envíos en CV:", mejor_registro$envios_optimos, "clientes\n")
-cat("Probabilidad de corte óptimo:", round(mejor_registro$prob_corte, 5), "\n")
-cat("num_leaves:", mejor_registro$num_leaves, "\n")
-cat("min_data_in_leaf:", mejor_registro$min_data_in_leaf, "\n")
-cat("feature_fraction:", mejor_registro$feature_fraction, "\n")
-cat("learning_rate:", mejor_registro$learning_rate, "\n")
-cat("num_iterations:", mejor_registro$num_iterations, "\n")
+cat("\n======================================================\n")
+cat("PREPARANDO PRODUCCIÓN FINAL (FLUJO CLASE 8)\n")
+cat(sprintf(
+    "Champion BO: Iter %d | Gan. Suavizada: $ %s | Corte BO: %d envíos\n",
+    mejor_registro$iteracion,
+    format(round(mejor_registro$ganancia_suavizada, 0), big.mark = ".", decimal.mark = ","),
+    mejor_registro$envios_optimos
+))
+cat(sprintf(
+    "HPs Champion: num_iterations=%d | num_leaves=%d | min_sum_hessian=%.6f (log10=%.3f)\n",
+    mejor_registro$num_iterations,
+    mejor_registro$num_leaves,
+    mejor_registro$min_sum_hessian_in_leaf,
+    log10(mejor_registro$min_sum_hessian_in_leaf)
+))
+cat(sprintf(
+    "Semillas a entrenar: %d (Primeras 5: %s ...)\n",
+    n_sem_total, paste(PARAM$semillas[1:5], collapse = ", ")
+))
+cat("======================================================\n")
 
-# 2. Configurar hiperparámetros finales
-param_champion <- list(
-    objective = "binary",
-    metric = "none",
-    boosting = "gbdt",
-    learning_rate = mejor_registro$learning_rate,
-    num_leaves = mejor_registro$num_leaves,
-    min_data_in_leaf = mejor_registro$min_data_in_leaf,
-    feature_fraction = mejor_registro$feature_fraction,
-    seed = 333331,
-    verbosity = -1,
-    num_threads = parallel::detectCores()
-)
+# 2. Construir Dataset Final de Entrenamiento con los 4 meses con clase completa
+#    (202103, 202104, 202105, 202106) y Matriz Futura (202108)
+df_train_prod <- df_train[foto_mes %in% PARAM$train_final]
+cat(sprintf(
+    "\nEntrenando Producción sobre meses: %s (%d filas totales | %d POS [%s] | %d BAJA+2 reales)\n",
+    paste(PARAM$train_final, collapse = ", "),
+    nrow(df_train_prod),
+    sum(df_train_prod$target_binario == 1L),
+    PARAM$target,
+    sum(df_train_prod$clase01 == 1L)
+))
 
-# 3. Reentrenar con el 100% de los datos de foto_mes == 202106
-cat("\nReentrenando modelo definitivo con el 100% de los clientes de 202106...\n")
 dtrain_final <- lgb.Dataset(
-    data = mat_train,
-    label = target_entreno,
-    params = list(max_bin = PARAM$max_bin),
+    data = data.matrix(df_train_prod[, ..campos_buenos]),
+    label = df_train_prod$target_binario,
+    params = list(max_bin = PARAM$max_bin, feature_pre_filter = FALSE),
     free_raw_data = FALSE
 )
+lgb.Dataset.construct(dtrain_final)
 
-modelo_champion <- lgb.train(
-    params = param_champion,
-    data = dtrain_final,
-    nrounds = mejor_registro$num_iterations,
-    verbose = -1
-)
-cat("Modelo Champion entrenado exitosamente.\n")
+mat_future <- data.matrix(df_future[, ..campos_buenos])
+clientes_future <- df_future$numero_de_cliente
+fotos_future <- df_future$foto_mes
 
-# 4. Feature Importance y Auditoría de Variables
-cat("\nExtrayendo Feature Importance del modelo Champion...\n")
-tb_importancia <- lgb.importance(modelo_champion)
+# Liberar memoria antes del loop de 100 entrenamientos
+rm(df_train, df_train_prod)
+gc(verbose = FALSE)
 
-cat("\nTop 30 variables más importantes del modelo:\n")
-print(head(tb_importancia, 30))
+# 3. Directorios de salida
+dir_plots <- file.path(dir_exp, "plots")
+dir_submits_ens <- file.path(dir_exp, "submits")
+dir_submits_chk <- file.path(dir_exp, "submits_checkpoints")
+dir.create(dir_plots, showWarnings = FALSE, recursive = TRUE)
+dir.create(dir_submits_ens, showWarnings = FALSE, recursive = TRUE)
+dir.create(dir_submits_chk, showWarnings = FALSE, recursive = TRUE)
 
-# Guardar gráfico de Feature Importance
-graf_importancia <- ggplot(head(tb_importancia, 30), aes(x = reorder(Feature, Gain), y = Gain)) +
-    geom_col(fill = "steelblue") +
-    coord_flip() +
-    labs(
-        title = "Top 30 Feature Importance - LightGBM Champion",
-        subtitle = paste("Ganancia CV: $", format(mejor_registro$ganancia_max, big.mark = ".")),
-        x = "Variables",
-        y = "Ganancia Relativa (Gain)"
-    ) +
-    theme_minimal()
-
-ggsave(file.path(dir_exp, "plots/feature_importance_top30.png"),
-    plot = graf_importancia, width = 10, height = 8, dpi = 300
-)
-cat("Gráfico guardado en:", file.path(dir_exp, "plots/feature_importance_top30.png"), "\n")
-
-# ============================================================
-# 9. SCORING SOBRE FOTO_MES 202108 (TEST / FUTURO)
-# ============================================================
-
-cat("\n--- SCORING DE LA CARTERA A EVALUAR (202108) ---\n")
-
-cat("Construyendo matriz predictora para agosto 2021...\n")
-mat_future <- as.matrix(df_future[, ..campos_buenos])
-
-cat("Generando probabilidades con modelo Champion...\n")
-pred_prob_future <- predict(modelo_champion, mat_future)
-
-tb_predicciones <- data.table(
-    numero_de_cliente = df_future$numero_de_cliente,
-    prob = pred_prob_future
-)
-
-# Ordenar de mayor a menor probabilidad de ser BAJA+2
-setorder(tb_predicciones, -prob)
-
-cat("Scoring completado. Clientes evaluados:", nrow(tb_predicciones), "\n")
-cat("Rango de probabilidades asignadas: [", round(min(tb_predicciones$prob), 5), "a", round(max(tb_predicciones$prob), 5), "]\n")
-
-# ============================================================
-# 10. GENERACIÓN DE ARCHIVOS DE SUBMIT PARA EL BOT DE ZULIP
-# ============================================================
-
-cat("\n--- GENERACIÓN DE ARCHIVOS PARA EL BOT (@competencia-uno) ---\n")
-
-# Identificador unico: experimento + iteracion champion (evita nombres fijos a mano)
-id_modelo <- sprintf("%s_it%03d", PARAM$experimento, mejor_registro$iteracion)
-corte_elegido <- if (is.na(PARAM$corte_final)) as.integer(mejor_registro$envios_optimos) else PARAM$corte_final
-
-dir.create(file.path(dir_exp, "submits"), showWarnings = FALSE)
-
-# Abanico de cortes estrategicos alrededor del corte elegido
-cortes_envios <- sort(unique(c(9500L, 10000L, 10500L, 11000L, 11500L, 12000L, corte_elegido)))
-
-for (corte in cortes_envios) {
-    archivo_submit <- file.path(dir_exp, sprintf("submits/%s_c%05d.csv", id_modelo, corte))
-
-    # Exportación con formato estricto para el bot (solo columna de IDs, sin encabezado)
-    fwrite(
-        tb_predicciones[1:corte, .(numero_de_cliente)],
-        file = archivo_submit,
-        col.names = FALSE
-    )
-
-    prob_minima_corte <- tb_predicciones$prob[corte]
-    cat(sprintf(
-        "Archivo generado: %s | Envíos: %5d | Prob mínima: %.5f\n",
-        archivo_submit, corte, prob_minima_corte
-    ))
+if (isTRUE(PARAM$guardar_submits_individuales)) {
+    dir_submits_sem <- file.path(dir_exp, "submits_semillas")
+    dir.create(dir_submits_sem, showWarnings = FALSE, recursive = TRUE)
 }
 
-# ============================================================
-# 11. MULTI-SEMILLA PARA EL BOT (MEDIA/SD) Y ENSAMBLE FINAL
-# ============================================================
-
-cat("\n--- INICIO DE ENTRENAMIENTO MULTI-SEMILLA ---\n")
-
-# 1. Vector de semillas definido en PARAM (CONFIGURACION DEL EXPERIMENTO)
-semillas_evaluacion <- PARAM$semillas
-
-dir.create(file.path(dir_exp, "submits_semillas"), showWarnings = FALSE)
-
-# Acumulador de probabilidades para el ensamble promedio
-prob_acumulada <- rep(0.0, nrow(mat_future))
-
-dtrain_full <- lgb.Dataset(
-    data = mat_train,
-    label = target_entreno,
-    params = list(max_bin = PARAM$max_bin),
-    free_raw_data = FALSE
+# 4. Matriz de probabilidades (filas = clientes 202108, columnas = 100 semillas)
+mat_probs_semillas <- matrix(
+    NA_real_,
+    nrow = length(clientes_future),
+    ncol = n_sem_total
 )
+colnames(mat_probs_semillas) <- sprintf("prob_s%03d", seq_len(n_sem_total))
 
-for (idx_s in seq_along(semillas_evaluacion)) {
-    semilla_actual <- semillas_evaluacion[idx_s]
+# Registro de convergencia del Top 11.000 a medida que agregamos semillas
+tb_convergencia <- data.table()
+top_clientes_prev <- integer(0)
 
-    param_semilla <- list(
-        objective = "binary",
-        metric = "none",
-        boosting = "gbdt",
-        learning_rate = mejor_registro$learning_rate,
-        num_leaves = mejor_registro$num_leaves,
-        min_data_in_leaf = mejor_registro$min_data_in_leaf,
-        feature_fraction = mejor_registro$feature_fraction,
-        seed = semilla_actual,
-        verbosity = -1,
-        num_threads = parallel::detectCores()
+cat("\n======================================================\n")
+cat(sprintf(
+    "ENTRENANDO ENSAMBLE DE %d SEMILLAS SOBRE 4 MESES (CORTE BASE = %d)\n",
+    n_sem_total, PARAM$corte_final
+))
+cat("======================================================\n")
+
+t0_loop_sem <- Sys.time()
+
+for (idx_s in seq_len(n_sem_total)) {
+    sem_actual <- PARAM$semillas[idx_s]
+    t0_sem <- Sys.time()
+
+    param_sem <- list(
+        objective               = "binary",
+        metric                  = "none",
+        boosting                = "gbdt",
+        first_metric_only       = TRUE,
+        boost_from_average      = TRUE,
+        feature_pre_filter      = FALSE,
+        force_row_wise          = TRUE,
+        verbosity               = -100L,
+        max_depth               = -1L,
+        min_gain_to_split       = 0.0,
+        lambda_l1               = 0.0,
+        lambda_l2               = 0.0,
+        max_bin                 = PARAM$max_bin,
+        learning_rate           = as.numeric(PARAM$lgbm_fijos$learning_rate),
+        feature_fraction        = as.numeric(PARAM$lgbm_fijos$feature_fraction),
+        min_data_in_leaf        = as.integer(PARAM$lgbm_fijos$min_data_in_leaf),
+        num_leaves              = as.integer(mejor_registro$num_leaves),
+        min_sum_hessian_in_leaf = as.numeric(mejor_registro$min_sum_hessian_in_leaf),
+        seed                    = as.integer(sem_actual),
+        num_threads             = parallel::detectCores()
     )
 
     modelo_s <- lgb.train(
-        params = param_semilla,
-        data = dtrain_full,
-        nrounds = mejor_registro$num_iterations,
-        verbose = -1
+        params  = param_sem,
+        data    = dtrain_final,
+        nrounds = as.integer(mejor_registro$num_iterations),
+        verbose = -100
     )
 
+    # En la Semilla 1 extraemos Importancia de Variables (evita entrenar 2 veces)
+    if (idx_s == 1L) {
+        tb_imp <- as.data.table(lgb.importance(modelo_s))
+        fwrite(tb_imp, file.path(dir_exp, "feature_importance_top30.csv"))
+
+        cat("\nTop 20 Variables más importantes (Gain) en Producción (4 meses):\n")
+        print(tb_imp[1:min(20L, nrow(tb_imp)), .(Feature, Gain, Cover, Frequency)])
+
+        tb_imp_top30 <- tb_imp[1:min(30L, nrow(tb_imp))]
+        tb_imp_top30[, Feature := factor(Feature, levels = rev(Feature))]
+
+        p_imp <- ggplot(tb_imp_top30, aes(x = Feature, y = Gain)) +
+            geom_col(fill = "steelblue") +
+            coord_flip() +
+            labs(
+                title = paste0("Top 30 Feature Importance (Gain) - ", PARAM$experimento),
+                subtitle = sprintf(
+                    "Champion 4 meses (%s) | iter=%d, leaves=%d, hessian=%.5f",
+                    paste(PARAM$train_final, collapse = "+"),
+                    mejor_registro$num_iterations,
+                    mejor_registro$num_leaves,
+                    mejor_registro$min_sum_hessian_in_leaf
+                ),
+                x = "Variable", y = "Gain"
+            ) +
+            theme_minimal(base_size = 11)
+
+        ggsave(file.path(dir_plots, "feature_importance_top30.png"),
+            plot = p_imp, width = 10, height = 8, dpi = 150
+        )
+    }
+
+    # Predicción sobre 202108
     pred_s <- predict(modelo_s, mat_future)
-    prob_acumulada <- prob_acumulada + pred_s
+    mat_probs_semillas[, idx_s] <- pred_s
 
-    # Ordenar y exportar el archivo individual de esta semilla
-    tb_pred_s <- data.table(
-        numero_de_cliente = df_future$numero_de_cliente,
-        prob = pred_s
-    )
-    setorder(tb_pred_s, -prob)
+    # Opcional: guardar submit individual de cada semilla
+    if (isTRUE(PARAM$guardar_submits_individuales)) {
+        tb_sub_s <- data.table(numero_de_cliente = clientes_future, prob = pred_s)
+        setorder(tb_sub_s, -prob)
 
-    archivo_s <- file.path(
-        dir_exp,
-        sprintf("submits_semillas/%s_c%05d_s%02d_%d.csv", id_modelo, corte_elegido, idx_s, semilla_actual)
-    )
+        arch_sem <- file.path(
+            dir_submits_sem,
+            sprintf(
+                "submit_%s_s%03d_%d_c%d.csv",
+                PARAM$experimento, idx_s, sem_actual, PARAM$corte_final
+            )
+        )
+        fwrite(tb_sub_s[1:PARAM$corte_final, .(numero_de_cliente)], arch_sem, col.names = FALSE)
+        rm(tb_sub_s)
+    }
 
-    fwrite(
-        tb_pred_s[1:corte_elegido, .(numero_de_cliente)],
-        file = archivo_s,
-        col.names = FALSE
-    )
+    # Medir estabilidad del corte 11.000 acumulado hasta idx_s semillas
+    prob_acum <- rowMeans(mat_probs_semillas[, 1:idx_s, drop = FALSE])
+    ord_acum <- order(prob_acum, decreasing = TRUE)
+    top_clientes_actual <- clientes_future[ord_acum[1:PARAM$corte_final]]
 
-    cat(sprintf("[Semilla %02d/%d - %d] Exportado: %s\n", idx_s, length(semillas_evaluacion), semilla_actual, archivo_s))
+    cambios_vs_prev <- if (idx_s == 1L) NA_integer_ else length(setdiff(top_clientes_actual, top_clientes_prev))
+    top_clientes_prev <- top_clientes_actual
+
+    tb_convergencia <- rbind(tb_convergencia, data.table(
+        n_semillas          = idx_s,
+        semilla             = sem_actual,
+        cambios_en_top11000 = cambios_vs_prev,
+        prob_corte_11000    = prob_acum[ord_acum[PARAM$corte_final]]
+    ))
+
+    dur_sem <- round(as.numeric(difftime(Sys.time(), t0_sem, units = "secs")), 1)
+    trans_min <- round(as.numeric(difftime(Sys.time(), t0_loop_sem, units = "mins")), 1)
+    eta_min <- round((trans_min / idx_s) * (n_sem_total - idx_s), 1)
+
+    cat(sprintf(
+        "Semilla %03d/%03d (%d) | %4.1fs | Cambios Top %d: %4s | Trans: %4.1fm | ETA: %4.1fm\n",
+        idx_s, n_sem_total, sem_actual, dur_sem, PARAM$corte_final,
+        ifelse(is.na(cambios_vs_prev), "-", as.character(cambios_vs_prev)),
+        trans_min, eta_min
+    ))
+
+    # Checkpoint cada 20 semillas (guarda submit parcial en corte 11000)
+    if (idx_s %% 20L == 0L || idx_s == n_sem_total) {
+        tb_chk <- data.table(numero_de_cliente = clientes_future, prob = prob_acum)
+        setorder(tb_chk, -prob)
+
+        arch_chk <- file.path(
+            dir_submits_chk,
+            sprintf(
+                "submit_%s_ensamble_parcial_%03dsem_c%d.csv",
+                PARAM$experimento, idx_s, PARAM$corte_final
+            )
+        )
+        fwrite(tb_chk[1:PARAM$corte_final, .(numero_de_cliente)], arch_chk, col.names = FALSE)
+
+        cat(sprintf(
+            "  [CHECKPOINT %03d SEMILLAS] Submit parcial guardado: %s\n",
+            idx_s, basename(arch_chk)
+        ))
+        rm(tb_chk)
+    }
+
+    rm(modelo_s)
+    gc(verbose = FALSE)
 }
 
-# 2. Exportar tambien el Ensamble Promedio de las semillas (1 solo archivo para el domingo)
-tb_ensamble <- data.table(
-    numero_de_cliente = df_future$numero_de_cliente,
-    prob = prob_acumulada / length(semillas_evaluacion)
-)
-setorder(tb_ensamble, -prob)
+fwrite(tb_convergencia, file.path(dir_exp, "convergencia_semillas_top11000.csv"))
 
-archivo_ensamble <- file.path(
-    dir_exp,
-    sprintf("submits/%s_ensamble%d_c%05d.csv", id_modelo, length(semillas_evaluacion), corte_elegido)
+# 5. Promediar probabilidades de las 100 semillas (Ensamble Final)
+prob_ensamble <- rowMeans(mat_probs_semillas)
+sd_ensamble <- apply(mat_probs_semillas, 1, sd)
+
+# Tabla maestra estilo pizarrón Gustavo (ID | 202108 | prob_s001..prob_s100 | prob_promedio | prob_sd)
+tb_tabla_sem <- data.table(
+    numero_de_cliente = clientes_future,
+    foto_mes          = fotos_future
 )
-fwrite(
-    tb_ensamble[1:corte_elegido, .(numero_de_cliente)],
-    file = archivo_ensamble,
-    col.names = FALSE
+tb_tabla_sem <- cbind(tb_tabla_sem, as.data.table(mat_probs_semillas))
+tb_tabla_sem[, prob_promedio := prob_ensamble]
+tb_tabla_sem[, prob_sd := sd_ensamble]
+setorder(tb_tabla_sem, -prob_promedio)
+
+# Guardar en RDS comprimido (rápido y liviano para iCloud) + tabla resumen en CSV
+saveRDS(tb_tabla_sem, file.path(dir_exp, sprintf("probabilidades_%dsemillas_202108.rds", n_sem_total)))
+
+tb_pred_ensamble <- tb_tabla_sem[, .(
+    numero_de_cliente,
+    foto_mes,
+    prob    = prob_promedio,
+    prob_sd = prob_sd
+)]
+fwrite(tb_pred_ensamble, file.path(dir_exp, "probabilidades_ensamble_202108.csv"))
+
+cat("\n======================================================\n")
+cat(sprintf("EXPORTANDO CORTES DEL ENSAMBLE FINAL (%d SEMILLAS)\n", n_sem_total))
+cat("======================================================\n")
+
+for (corte in PARAM$cortes_grilla) {
+    # tb_pred_ensamble ya viene ordenado por prob descendente (tb_tabla_sem)
+    arch_ens <- file.path(
+        dir_submits_ens,
+        sprintf("submit_%s_ensamble%dsem_c%d.csv", PARAM$experimento, n_sem_total, corte)
+    )
+    # Formato bot @competencia-uno: solo los IDs a estimular, sin encabezado
+    fwrite(tb_pred_ensamble[1:corte, .(numero_de_cliente)], arch_ens, col.names = FALSE)
+
+
+    prob_umbral <- tb_pred_ensamble[corte, prob]
+    cat(sprintf(
+        "  -> Corte %5d envíos (p_corte = %.5f): %s\n",
+        corte, prob_umbral, basename(arch_ens)
+    ))
+}
+
+# 6. Gráficos diagnósticos de Producción (Curva de Probabilidad + Convergencia de las 100 Semillas)
+tb_top20k <- copy(tb_pred_ensamble[1:min(20000L, nrow(tb_pred_ensamble))])
+tb_top20k[, ranking_envio := .I]
+
+p_prod <- ggplot(tb_top20k, aes(x = ranking_envio, y = prob)) +
+    geom_ribbon(aes(ymin = pmax(0, prob - prob_sd), ymax = pmin(1, prob + prob_sd)),
+        fill = "#9ecae1", alpha = 0.5
+    ) +
+    geom_line(color = "#08519c", linewidth = 0.9) +
+    geom_vline(xintercept = PARAM$corte_final, linetype = "dashed", color = "#cb181d", linewidth = 0.8) +
+    geom_vline(xintercept = mejor_registro$envios_optimos, linetype = "dotted", color = "#238b45", linewidth = 0.8) +
+    annotate("text",
+        x = PARAM$corte_final + 300, y = max(tb_top20k$prob) * 0.90,
+        label = sprintf("Corte fijo: %d", PARAM$corte_final), color = "#cb181d", hjust = 0, size = 3.5
+    ) +
+    annotate("text",
+        x = mejor_registro$envios_optimos - 300, y = max(tb_top20k$prob) * 0.78,
+        label = sprintf("Corte óptimo BO: %d", mejor_registro$envios_optimos), color = "#238b45", hjust = 1, size = 3.5
+    ) +
+    scale_x_continuous(breaks = seq(0, 20000, by = 2000)) +
+    labs(
+        title = sprintf(
+            "Curva de Probabilidad del Ensamble (%d Semillas) en 202108 - %s",
+            n_sem_total, PARAM$experimento
+        ),
+        subtitle = sprintf("Línea azul: Probabilidad media | Banda celeste: ±1 DE entre las %d semillas", n_sem_total),
+        x = "Cantidad de Envíos (Clientes ordenados por probabilidad decreciente)",
+        y = "Probabilidad estimada de POS (BAJA+1 / BAJA+2)"
+    ) +
+    theme_minimal(base_size = 11)
+
+ggsave(file.path(dir_plots, "prod_curva_probabilidades_202108.png"),
+    plot = p_prod, width = 10, height = 6, dpi = 150
 )
 
-# Probabilidades del ensamble (permite recortar en cualquier corte sin reentrenar)
-fwrite(tb_ensamble, file = file.path(dir_exp, "probabilidades_ensamble_202108.csv"))
+if (nrow(tb_convergencia) >= 2L) {
+    p_conv <- ggplot(
+        tb_convergencia[!is.na(cambios_en_top11000)],
+        aes(x = n_semillas, y = cambios_en_top11000)
+    ) +
+        geom_line(color = "#2b8cbe", linewidth = 0.8) +
+        geom_point(color = "#08519c", size = 1.8) +
+        labs(
+            title = sprintf(
+                "Convergencia del Ensamble de %d Semillas (Estabilidad del Corte %d)",
+                n_sem_total, PARAM$corte_final
+            ),
+            subtitle = "Cantidad de clientes que entran/salen del Top 11.000 al agregar cada nueva semilla",
+            x = "Cantidad acumulada de semillas promediadas",
+            y = "Clientes que cambian en el Top 11.000 vs (k-1) semillas"
+        ) +
+        theme_minimal(base_size = 11)
 
-cat(sprintf(
-    "\nArchivo Ensamble Final (%d semillas promediadas) generado en:\n%s\n",
-    length(semillas_evaluacion), archivo_ensamble
-))
+    ggsave(file.path(dir_plots, "prod_convergencia_semillas_202108.png"),
+        plot = p_conv, width = 10, height = 5.5, dpi = 150
+    )
+}
+
+cat("\nGráficos de producción guardados en:", dir_plots, "\n")
 
 # ============================================================
 # CIERRE FORMAL DEL LOG
