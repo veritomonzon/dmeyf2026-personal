@@ -13,8 +13,8 @@ options(scipen = 999)
 # Despues de correr: completar resultados en el HISTORIAL y commitear.
 
 PARAM <- list(
-    experimento = "exp07_M2_ranking_negocio", # exp06 M1 | exp07 M2 | exp08 M3 | exp09 M4 | exp10 M5
-    modelo = "M2", # M1 | M2 | M3 | M4 | M5 (README: FLUJO DE TRABAJO VIGENTE)
+    experimento = "exp08_M3_ranking_lags", # exp06 M1 | exp07 M2 | exp08 M3 | exp09 M4 | exp10 M5
+    modelo = "M3", # M1 | M2 | M3 | M4 | M5 (README: FLUJO DE TRABAJO VIGENTE)
     etapa = "testeo", # "testeo" = BO + 10 semillas en 202106 | "produccion" = n_semillas_prod en 202108 (usar modo_ht = "ninguno")
     maquina = "Mac", # Mac | VM | PC2 (queda en el registro)
     target = "baja12", # "baja2" = BAJA+2 vs resto | "baja12" = BAJA+1 + BAJA+2 vs CONTINUA
@@ -51,7 +51,7 @@ PARAM <- list(
         994949L, 995959L, 996161L, 998989L, 987979L
     ),
     corte_final = 11000L, # Corte principal para checkpoints y archivos individuales
-    cortes_grilla = c(9000L, 9500L, 10000L, 10500L, 11000L, 11500L, 12000L) # Grilla de cortes para el ensamble
+    cortes_grilla = c(9000L, 9500L, 10000L, 10500L, 11000L, 11500L, 12000L, 12500L, 13000L, 13500L, 14000L) # Grilla de cortes para el ensamble
 )
 
 # Completar automáticamente de 20 al maximo entre n_semillas_test y n_semillas_prod con primos de 6 dígitos reproducibles
@@ -112,7 +112,7 @@ if (length(PARAM$semillas) < n_semillas_total) {
 #   Public: ens20sem c11000 99,50 | SUBMIT ENTREGA SEGURA: ens100sem c11500
 # --- FLUJO VIGENTE (09-oct): testeo en 202106 con 10 semillas, fijos lr 0.005 / ff 0.5 / ff_bynode 0.2 ---
 # exp06_M1_lagsdeltas | Mac | M1 | testeo 202106: ensamble 407,4 M (12.527 env) | semillas 408,1 +- 5,7 | c11000 404,8 M | 7,9 h
-# exp07_M2_ranking_negocio | Mac | M2: ranking cero fijo + flags/totalizadores/ratios, sin lags | PENDIENTE
+# exp07_M2_ranking_negocio | Mac | M2: ranking cero fijo + flags/totalizadores/ratios, sin lags | testeo 202106: ensamble 440,6 M (14.512 env) | semillas 426,1 +- 5,4 | c11000 413,9 M | 3,2 h
 # exp08_M3_ranking_lags    | PC2 | M3: ranking cero fijo -> lags/deltas sobre rankeados         | PENDIENTE
 # exp09_M4_lags_negocio    | VM  | M4: M1 + flags/totalizadores/ratios (= FE de exp05)          | PENDIENTE
 # exp10_M5_lags_ranking    | VM  | M5: lags/deltas -> ranking cero fijo sobre todo              | PENDIENTE
