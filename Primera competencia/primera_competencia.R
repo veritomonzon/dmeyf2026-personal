@@ -116,6 +116,8 @@ if (length(PARAM$semillas) < n_semillas_total) {
 # exp08_M3_ranking_lags    | PC2 | M3: ranking cero fijo -> lags/deltas sobre rankeados         | PENDIENTE
 # exp09_M4_lags_negocio    | VM  | M4: M1 + flags/totalizadores/ratios (= FE de exp05)          | PENDIENTE
 # exp10_M5_lags_ranking    | VM  | M5: lags/deltas -> ranking cero fijo sobre todo              | PENDIENTE
+# exp11_M1_hp_gustavo      | PC2 | M1 + HP fijos de Gustavo (planilla TareaHogar 04): leaves 44, hessian 0.00683, iters 1920, lr 0.005, ff 0.5, sin bynode | PENDIENTE
+# exp12_M7_lags_tend_zero  | ?   | M7: M1 + flags _zero + tend3/avg3 (En Limpio 1.3 y 1.4)    | PENDIENTE
 
 # ============================================================
 # CARGA DE LIBRERIAS Y CARGA DE BASE
@@ -133,6 +135,7 @@ library(cluster)
 library(lightgbm)
 library(DiceKriging)
 library(mlrMBO)
+library(Rcpp) # fhistC de Gustavo (tendencia y promedio historico en C++)
 
 # ============================================================
 # LOG
@@ -407,6 +410,115 @@ if (!file.exists(archivo_rds_fe)) {
         invisible(dt)
     }
 
+    # Flags _zero ("En Limpio" 1.3): 1 si la variable vale 0, NA si es NA, 0 en el resto. No entran al ranking
+    agregar_flags_zero <- function(dt, cols) {
+        for (v in cols) {
+            x <- dt[[v]]
+            if (!any(x == 0, na.rm = TRUE)) next # solo variables que alguna vez valen cero
+            if (all(x %in% c(0, 1, NA))) next # binarias 0/1: el flag repetiria la variable
+            set(dt, j = paste0(v, "_zero"), value = fifelse(is.na(x), NA_integer_, as.integer(x == 0)))
+        }
+        invisible(dt)
+    }
+
+    # Tendencia, minimo, maximo y promedio de los ultimos n meses ("En Limpio" 1.4, codigo de Gustavo)
+    # La tendencia es la pendiente de la recta de cuadrados minimos; fhistC esta escrita en C++ por velocidad
+    cppFunction("NumericVector fhistC(NumericVector pcolumna, IntegerVector pdesde )
+    {
+      double  x[100] ;
+      double  y[100] ;
+
+      int n = pcolumna.size();
+      NumericVector out( 5*n );
+
+      for(int i = 0; i < n; i++)
+      {
+        if( pdesde[i]-1 < i )  out[ i + 4*n ]  =  pcolumna[i-1] ;
+        else                   out[ i + 4*n ]  =  NA_REAL ;
+
+        int  libre    = 0 ;
+        int  xvalor   = 1 ;
+
+        for( int j= pdesde[i]-1;  j<=i; j++ )
+        {
+           double a = pcolumna[j] ;
+
+           if( !R_IsNA( a ) )
+           {
+              y[ libre ]= a ;
+              x[ libre ]= xvalor ;
+              libre++ ;
+           }
+
+           xvalor++ ;
+        }
+
+        if( libre > 1 )
+        {
+          double  xsum  = x[0] ;
+          double  ysum  = y[0] ;
+          double  xysum = xsum * ysum ;
+          double  xxsum = xsum * xsum ;
+          double  vmin  = y[0] ;
+          double  vmax  = y[0] ;
+
+          for( int h=1; h<libre; h++)
+          {
+            xsum  += x[h] ;
+            ysum  += y[h] ;
+            xysum += x[h]*y[h] ;
+            xxsum += x[h]*x[h] ;
+
+            if( y[h] < vmin )  vmin = y[h] ;
+            if( y[h] > vmax )  vmax = y[h] ;
+          }
+
+          out[ i ]  =  (libre*xysum - xsum*ysum)/(libre*xxsum -xsum*xsum) ;
+          out[ i + n ]    =  vmin ;
+          out[ i + 2*n ]  =  vmax ;
+          out[ i + 3*n ]  =  ysum / libre ;
+        }
+        else
+        {
+          out[ i       ]  =  NA_REAL ;
+          out[ i + n   ]  =  NA_REAL ;
+          out[ i + 2*n ]  =  NA_REAL ;
+          out[ i + 3*n ]  =  NA_REAL ;
+        }
+      }
+
+      return  out;
+    }")
+
+    TendenciaYmuchomas <- function(dataset, cols, ventana = 6, tendencia = TRUE,
+                                   minimo = TRUE, maximo = TRUE, promedio = TRUE,
+                                   ratioavg = FALSE, ratiomax = FALSE) {
+        gc(verbose = FALSE)
+        ventana_regresion <- ventana
+        last <- nrow(dataset)
+
+        # vector_desde: fila donde empieza la ventana de cada registro (se corta al cambiar de cliente)
+        vector_ids <- dataset[, numero_de_cliente]
+        vector_desde <- seq(-ventana_regresion + 2, nrow(dataset) - ventana_regresion + 1)
+        vector_desde[1:ventana_regresion] <- 1
+        for (i in 2:last) {
+            if (vector_ids[i - 1] != vector_ids[i]) vector_desde[i] <- i
+        }
+        for (i in 2:last) {
+            if (vector_desde[i] < vector_desde[i - 1]) vector_desde[i] <- vector_desde[i - 1]
+        }
+
+        for (campo in cols) {
+            nueva_col <- fhistC(dataset[, get(campo)], vector_desde)
+            if (tendencia) dataset[, paste0(campo, "_tend", ventana) := nueva_col[(0 * last + 1):(1 * last)]]
+            if (minimo) dataset[, paste0(campo, "_min", ventana) := nueva_col[(1 * last + 1):(2 * last)]]
+            if (maximo) dataset[, paste0(campo, "_max", ventana) := nueva_col[(2 * last + 1):(3 * last)]]
+            if (promedio) dataset[, paste0(campo, "_avg", ventana) := nueva_col[(3 * last + 1):(4 * last)]]
+            if (ratioavg) dataset[, paste0(campo, "_ratioavg", ventana) := get(campo) / nueva_col[(3 * last + 1):(4 * last)]]
+            if (ratiomax) dataset[, paste0(campo, "_ratiomax", ventana) := get(campo) / nueva_col[(2 * last + 1):(3 * last)]]
+        }
+    }
+
     # ============================================================
     # 6. PREPROCESAMIENTO SEGUN MODELO (M1 A M5)
     # ============================================================
@@ -446,6 +558,17 @@ if (!file.exists(archivo_rds_fe)) {
         agregar_lags_deltas(dataset, cols_originales)
         cols_rank <- setdiff(names(dataset)[sapply(dataset, is.numeric)], cols_excluir)
         rankear_cero_fijo(dataset, cols_rank)
+    }
+
+    if (PARAM$modelo == "M7") { # M1 + flags _zero + tendencia y promedio de 3 meses ("En Limpio" 1.3 y 1.4)
+        agregar_flags_zero(dataset, cols_originales) # sobre originales, antes de crear la historia
+        agregar_lags_deltas(dataset, cols_originales)
+        setorderv(dataset, c("numero_de_cliente", "foto_mes")) # fhistC necesita filas ordenadas por cliente y mes
+        TendenciaYmuchomas(dataset,
+            cols = cols_originales, ventana = 3,
+            tendencia = TRUE, minimo = FALSE, maximo = FALSE, promedio = TRUE,
+            ratioavg = FALSE, ratiomax = FALSE
+        )
     }
 
     cat("Tiempo de preprocesamiento:", round(difftime(Sys.time(), tiempo_fe_inicio, units = "mins"), 2), "minutos\n")
