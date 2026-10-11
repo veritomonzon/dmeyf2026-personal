@@ -10,21 +10,21 @@ options(scipen = 999)
 # ============================================================
 # Unico bloque que se modifica entre corridas (Mac o VM).
 # Antes de correr: actualizar PARAM y agregar la linea al HISTORIAL.
-# Despues de correr: completar resultados en el HISTORIAL y commitear.
+# Despues de correr: completar resultados en el HISTORIAL.
 
 PARAM <- list(
     experimento = "exp13_M8_receta472",
-    modelo = "M8", # sin prestamos personales + lag1/delta1 (receta 472 M)
-    etapa = "testeo",
+    modelo = "M8", # sin prestamos personales + lag1/delta1
+    etapa = "produccion", # "testeo" = HP + 10 semillas en 202106 | "produccion" = n_semillas_prod en 202108 (usar modo_ht = "ninguno")
     maquina = "Mac", # Mac | VM | PC2 (queda en el registro)
     target = "baja12", # "baja2" = BAJA+2 vs resto | "baja12" = BAJA+1 + BAJA+2 vs CONTINUA
-    max_bin = 31L, # 255 = default LightGBM | 31 = frugal (Clase 06 / Clase 08)
-    undersampling = 1.0, # receta 472
+    max_bin = 31L, # 255 = default LightGBM | 31 = discretizacion gruesa (regulariza)
+    undersampling = 1.0, # 1.0 = sin undersampling de CONTINUA
     train_bo = c(202103L, 202104L), # BO y testeo: entrena en 03+04 (deja 05 de gap)
     val_bo = 202106L, # BO y testeo: valida / testea en 06
     train_final = c(202103L, 202104L, 202105L, 202106L), # Produccion: entrena en 03..06
     future = 202108L, # Produccion: predice 08
-    modo_ht = "fijos", # HP fijos de la planilla (Gustavo, TareaHogar 04: 472 M en 202106), sin BO
+    modo_ht = "ninguno", # reutiliza HT_resultados.csv de exp13
     bo_iteraciones = 50L, # no se usa en modo "fijos"
     excluir_dudosos = TRUE, # modelo auxiliar en el 30% + eliminar CONTINUA con prob30 > umbral
     umbral_dudosos = 0.5,
@@ -102,7 +102,7 @@ if (length(PARAM$semillas) < n_semillas_total) {
 #   vs exp03c (103,18 / 10 sem 102,84 +- 1,75): no mejora -> se descarta, se mantiene exp03c
 #   Top 11.000 comparte 9.962 clientes con exp03c (Spearman probs 0,94)
 # exp05_clase8_bo3hp_100sem | Mac | baja12 | max_bin 31 | BO mlrMBO 3 HPs (50 iters) + 100 sem | 12,5 h
-#   Flujo Clase 8: BO train 202103+202104 (gap 202105), val 202106 (ganancia suavizada +-250)
+#   Flujo: BO train 202103+202104 (gap 202105), val 202106 (ganancia suavizada +-250)
 #   Produccion: train 202103..202106, ensamble promedio 100 semillas sobre 202108
 #   Fijos: lr 0.01, ff 0.5, min_data 0 | Bordes: iters {64..4096}, leaves {16..2048}, hessian [1e-6, 0.1]
 #   champion it31: iters 685, leaves 849, hessian 0.0913 (cerca del borde 0.1)
@@ -111,12 +111,16 @@ if (length(PARAM$semillas) < n_semillas_total) {
 # --- FLUJO VIGENTE (09-oct): testeo en 202106 con 10 semillas, fijos lr 0.005 / ff 0.5 / ff_bynode 0.2 ---
 # exp06_M1_lagsdeltas | Mac | M1 | testeo 202106: ensamble 407,4 M (12.527 env) | semillas 408,1 +- 5,7 | c11000 404,8 M | 7,9 h
 # exp07_M2_ranking_negocio | Mac | M2: ranking cero fijo + flags/totalizadores/ratios, sin lags | testeo 202106: ensamble 440,6 M (14.512 env) | semillas 426,1 +- 5,4 | c11000 413,9 M | 3,2 h
-# exp08_M3_ranking_lags    | PC2 | M3: ranking cero fijo -> lags/deltas sobre rankeados         | PENDIENTE
-# exp09_M4_lags_negocio    | VM  | M4: M1 + flags/totalizadores/ratios (= FE de exp05)          | PENDIENTE
-# exp10_M5_lags_ranking    | VM  | M5: lags/deltas -> ranking cero fijo sobre todo              | PENDIENTE
-# exp11_M1_hp_gustavo      | PC2 | M1 + HP fijos de Gustavo (planilla TareaHogar 04): leaves 44, hessian 0.00683, iters 1920, lr 0.005, ff 0.5, sin bynode | PENDIENTE
-# exp12_M7_lags_tend_zero  | ?   | M7: M1 + flags _zero + tend3/avg3 (En Limpio 1.3 y 1.4)    | PENDIENTE
-# exp13_M8_receta472       | Mac | M8: sin prestamos + lag1/delta1 + exclusion dudosos (prob30 > 0.5) + HP 472 M (leaves 44, hessian 0.00683, iters 1920, ff_bynode 0.2), sin undersampling | PENDIENTE
+#   Produccion 50 sem (1,1 h) | Public ens50sem c13500 90,86 -> entrega segura hasta el envio de M8
+# exp08_M3_ranking_lags    | PC2 | M3: ranking cero fijo -> lags/deltas sobre rankeados         | testeo 202106: ensamble 385,0 M (12.311 env) | semillas 385,1 +- 4,9 | c11000 379,5 M
+# exp09_M4_lags_negocio    | VM  | M4: M1 + flags/totalizadores/ratios (= FE de exp05)          | testeo 202106: ensamble 417,3 M (13.502 env) | semillas 413,9 +- 3,4 | c11000 404,8 M
+# exp10_M5_lags_ranking    | VM  | M5: lags/deltas -> ranking cero fijo sobre todo              | testeo 202106: ensamble 405,9 M (10.327 env) | semillas 404,9 +- 3,1 | c11000 403,7 M
+# exp11_M1_hp_gustavo      | PC2 | M1 + HP fijos: leaves 44, hessian 0.00683, iters 1920, lr 0.005, ff 0.5, sin bynode | testeo 202106: ensamble 378,6 M (14.380 env) | semillas 379,0 +- 4,4 | c11000 368,5 M
+#   En comparacion_modelos.R figura como M6. Diagnostico: con el FE de M1, estos HP no alcanzan
+# exp12_M7_lags_tend_zero  | ?   | M7: M1 + flags _zero + tend3/avg3 (En Limpio 1.3 y 1.4)    | NO SE CORRIO
+# exp13_M8_receta472M | Mac | M8: sin prestamos + lag1/delta1 + exclusion dudosos (prob30 > 0.5) + HP (leaves 44, hessian 0.00683, iters 1920, ff_bynode 0.2), sin undersampling | testeo 202106: ensamble 468,0 M (12.829 env) | semillas 463,4 +- 2,5 | 0,39 h
+#   comp02_M1_a_M8: mejor modelo, supera a M2 en las 10 semillas (Wilcoxon, p Holm 0,042); ningun ensamble de a pares lo mejora
+#   Produccion 50 sem (1,9 h, 195 dudosos excluidos) | Public ens50sem c13000 93,78 -> SUBMIT FINAL (11-oct)
 
 # ============================================================
 # CARGA DE LIBRERIAS Y CARGA DE BASE
@@ -134,7 +138,7 @@ library(cluster)
 library(lightgbm)
 library(DiceKriging)
 library(mlrMBO)
-library(Rcpp) # fhistC de Gustavo (tendencia y promedio historico en C++)
+library(Rcpp)
 
 # ============================================================
 # LOG
@@ -409,7 +413,7 @@ if (!file.exists(archivo_rds_fe)) {
         invisible(dt)
     }
 
-    # Flags _zero ("En Limpio" 1.3): 1 si la variable vale 0, NA si es NA, 0 en el resto. No entran al ranking
+    # Flags _zero: 1 si la variable vale 0, NA si es NA, 0 en el resto. No entran al ranking
     agregar_flags_zero <- function(dt, cols) {
         for (v in cols) {
             x <- dt[[v]]
@@ -420,7 +424,7 @@ if (!file.exists(archivo_rds_fe)) {
         invisible(dt)
     }
 
-    # Tendencia, minimo, maximo y promedio de los ultimos n meses ("En Limpio" 1.4, codigo de Gustavo)
+    # Tendencia, minimo, maximo y promedio de los ultimos n meses
     # La tendencia es la pendiente de la recta de cuadrados minimos; fhistC esta escrita en C++ por velocidad
     cppFunction("NumericVector fhistC(NumericVector pcolumna, IntegerVector pdesde )
     {
@@ -553,13 +557,13 @@ if (!file.exists(archivo_rds_fe)) {
         agregar_ratios_longitudinales(dataset)
     }
 
-    if (PARAM$modelo == "M5") { # orden Gustavo: primero historia, despues ranking sobre todo
+    if (PARAM$modelo == "M5") { # primero historia, despues ranking sobre todo
         agregar_lags_deltas(dataset, cols_originales)
         cols_rank <- setdiff(names(dataset)[sapply(dataset, is.numeric)], cols_excluir)
         rankear_cero_fijo(dataset, cols_rank)
     }
 
-    if (PARAM$modelo == "M7") { # M1 + flags _zero + tendencia y promedio de 3 meses ("En Limpio" 1.3 y 1.4)
+    if (PARAM$modelo == "M7") { # M1 + flags _zero + tendencia y promedio de 3 meses
         agregar_flags_zero(dataset, cols_originales) # sobre originales, antes de crear la historia
         agregar_lags_deltas(dataset, cols_originales)
         setorderv(dataset, c("numero_de_cliente", "foto_mes")) # fhistC necesita filas ordenadas por cliente y mes
@@ -570,7 +574,7 @@ if (!file.exists(archivo_rds_fe)) {
         )
     }
 
-    if (PARAM$modelo == "M8") { # receta 472 M (Zulip): sin prestamos personales + lag1 y delta1
+    if (PARAM$modelo == "M8") { # sin prestamos personales + lag1 y delta1
         cols_prestamos <- c("cprestamos_personales", "mprestamos_personales")
         dataset[, (cols_prestamos) := NULL]
         cols_m8 <- setdiff(cols_originales, cols_prestamos)
@@ -586,10 +590,10 @@ if (!file.exists(archivo_rds_fe)) {
     cat("\n--- FIN PREPROCESAMIENTO ---\n\n")
 
     # ============================================================
-    # 6. PARTICIONES TEMPORALES (CLASE 8) Y FUNCIÓN GANANCIA
+    # 6. PARTICIONES TEMPORALES Y FUNCIÓN GANANCIA
     # ============================================================
 
-    cat("\n--- PREPARACIÓN DE PARTICIONES TEMPORALES (FLUJO CLASE 8) ---\n")
+    cat("\n--- PREPARACIÓN DE PARTICIONES TEMPORALES ---\n")
 
     # 1. Definición de campos predictores (excluyendo identificadores y metas)
     cols_excluir_modelo <- c("numero_de_cliente", "foto_mes", "clase_ternaria", "clase01", "target_binario")
@@ -623,13 +627,13 @@ if (!file.exists(archivo_rds_fe)) {
     print(dcast(df_train, foto_mes ~ clase_ternaria, fun.aggregate = length, value.var = "numero_de_cliente"))
 
     # Guardar para no volver a correr el FE en próximas corridas de Opción 1
-    cat("\nGuardando particiones Clase 8 (Opción 1) en:", archivo_rds_fe, "\n")
+    cat("\nGuardando particiones en:", archivo_rds_fe, "\n")
     saveRDS(
         list(df_train = df_train, df_future = df_future, campos_buenos = campos_buenos),
         file = archivo_rds_fe
     )
 } else {
-    cat("\n--- CARGANDO PARTICIONES CLASE 8 (OPCIÓN 1) DESDE DISCO (.RDS) ---\n")
+    cat("\n--- CARGANDO PARTICIONES DESDE DISCO (.RDS) ---\n")
     objs <- readRDS(archivo_rds_fe)
     df_train <- objs$df_train
     df_future <- objs$df_future
@@ -710,7 +714,7 @@ evaluar_validacion <- function(probs, target_baja2_real, corte_fijo = PARAM$cort
 cat("Particiones temporales y función de ganancia suavizada listas.\n")
 
 # ============================================================
-# 7. OPTIMIZACIÓN BAYESIANA DE HIPERPARÁMETROS (CLASE 8 - 3 HPs)
+# 7. OPTIMIZACIÓN BAYESIANA DE HIPERPARÁMETROS (3 HPs)
 # ============================================================
 # Desarrollo: Entrena en 202103 + 202104 (gap = 202105) y valida en 202106
 # Maximiza Ganancia Suavizada (ventana centrada de 501 envíos = +-250)
@@ -724,9 +728,11 @@ idx_bo_val <- which(df_train$foto_mes == PARAM$val_bo)
 target_val_baja2 <- df_train$clase01[idx_bo_val]
 clase_ternaria_val <- df_train$clase_ternaria[idx_bo_val]
 
-# Exclusion de registros dudosos (receta 472 M, Zulip): un modelo auxiliar entrenado en el 30% de los meses
-# de entrenamiento puntua el 70% restante; se eliminan los CONTINUA con prob30 > 0.5 y el resto se entrena
-# con undersampling de CONTINUA. La particion es fija (primera semilla) para que todas las semillas usen los mismos datos.
+# Exclusion de registros dudosos: un modelo auxiliar entrenado en el 30% de los meses de entrenamiento
+# puntua el 70% restante; se eliminan los CONTINUA con prob30 > umbral_dudosos y el modelo final entrena
+# solo con ese 70% (aplicando PARAM$undersampling; 1.0 = sin undersampling). La particion es fija
+# (primera semilla) para que todas las semillas usen los mismos datos.
+
 filtrar_dudosos <- function(idx) {
     dt_idx <- data.table(idx = idx, clase = df_train$clase_ternaria[idx], mes = df_train$foto_mes[idx])
     set.seed(PARAM$semillas[1], kind = "L'Ecuyer-CMRG")
@@ -1115,7 +1121,7 @@ if (nrow(tb_resultados_ht) > 1) {
         geom_point(alpha = 0.8) +
         scale_color_viridis_c(option = "plasma", name = "Ganancia Suave (M)") +
         labs(
-            title = "Espacio de Hiperparámetros Explorado (Receta Frugal 3 HPs)",
+            title = "Espacio de Hiperparámetros Explorado (3 HPs)",
             x = "num_leaves",
             y = "log10(min_sum_hessian_in_leaf)",
             size = "num_iterations"
@@ -1127,7 +1133,7 @@ if (nrow(tb_resultados_ht) > 1) {
 }
 
 # ============================================================
-# 7.2 TESTEO EN JUNIO: 10 SEMILLAS CON LOS MEJORES HP (TUTORIA 09-OCT)
+# 7.2 TESTEO EN JUNIO: 10 SEMILLAS CON LOS MEJORES HP
 # ============================================================
 # Entrena en train_bo (202103+202104) con los mejores HP de la BO y las MISMAS 10 semillas
 # en todos los modelos, y predice val_bo (202106). La decision entre modelos se toma con
@@ -1284,9 +1290,8 @@ if (PARAM$etapa == "testeo") {
 }
 
 # ==============================================================================
-# 8. PRODUCCIÓN FINAL CLASE 8: ENTRENAMIENTO EN 4 MESES (202103..202106)
+# 8. PRODUCCIÓN FINAL: ENTRENAMIENTO EN 4 MESES (202103..202106)
 #    + IMPORTANCIA DE VARIABLES + ENSAMBLE DE n_semillas_prod SEMILLAS SOBRE 202108
-#    (solo si etapa == "produccion")
 # ==============================================================================
 
 if (PARAM$etapa == "produccion") {
@@ -1297,7 +1302,7 @@ if (PARAM$etapa == "produccion") {
     mejor_registro <- tb_resultados_ht[idx_mejor]
 
     cat("\n======================================================\n")
-    cat("PREPARANDO PRODUCCIÓN FINAL (FLUJO CLASE 8)\n")
+    cat("PREPARANDO PRODUCCIÓN FINAL\n")
     cat(sprintf(
         "Champion BO: Iter %d | Gan. Suavizada: $ %s | Corte BO: %d envíos\n",
         mejor_registro$iteracion,
@@ -1525,7 +1530,7 @@ if (PARAM$etapa == "produccion") {
     prob_ensamble <- rowMeans(mat_probs_semillas)
     sd_ensamble <- apply(mat_probs_semillas, 1, sd)
 
-    # Tabla maestra estilo pizarrón Gustavo (ID | 202108 | prob_s001..prob_s100 | prob_promedio | prob_sd)
+    # Tabla de probabilidades por semilla (ID | 202108 | prob_s001..prob_sNNN | prob_promedio | prob_sd)
     tb_tabla_sem <- data.table(
         numero_de_cliente = clientes_future,
         foto_mes          = fotos_future
@@ -1556,7 +1561,7 @@ if (PARAM$etapa == "produccion") {
             dir_submits_ens,
             sprintf("submit_%s_ensamble%dsem_c%d.csv", PARAM$experimento, n_sem_total, corte)
         )
-        # Formato bot @competencia-uno: solo los IDs a estimular, sin encabezado
+        # Formato de entrega: solo los IDs a estimular, sin encabezado
         fwrite(tb_pred_ensamble[1:corte, .(numero_de_cliente)], arch_ens, col.names = FALSE)
 
 
