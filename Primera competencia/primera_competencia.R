@@ -13,33 +13,31 @@ options(scipen = 999)
 # Despues de correr: completar resultados en el HISTORIAL y commitear.
 
 PARAM <- list(
-    experimento = "exp08_M3_ranking_lags", # exp06 M1 | exp07 M2 | exp08 M3 | exp09 M4 | exp10 M5
-    modelo = "M3", # M1 | M2 | M3 | M4 | M5 (README: FLUJO DE TRABAJO VIGENTE)
-    etapa = "testeo", # "testeo" = BO + 10 semillas en 202106 | "produccion" = n_semillas_prod en 202108 (usar modo_ht = "ninguno")
+    experimento = "exp13_M8_receta472",
+    modelo = "M8", # sin prestamos personales + lag1/delta1 (receta 472 M)
+    etapa = "testeo",
     maquina = "Mac", # Mac | VM | PC2 (queda en el registro)
     target = "baja12", # "baja2" = BAJA+2 vs resto | "baja12" = BAJA+1 + BAJA+2 vs CONTINUA
     max_bin = 31L, # 255 = default LightGBM | 31 = frugal (Clase 06 / Clase 08)
-    undersampling = 1.0, # Clase 08: 1.0 = sin undersampling (100% de CONTINUA)
+    undersampling = 1.0, # receta 472
     train_bo = c(202103L, 202104L), # BO y testeo: entrena en 03+04 (deja 05 de gap)
     val_bo = 202106L, # BO y testeo: valida / testea en 06
     train_final = c(202103L, 202104L, 202105L, 202106L), # Produccion: entrena en 03..06
     future = 202108L, # Produccion: predice 08
-    modo_ht = "bayesiana", # "bayesiana" = mlrMBO 3 HPs | "fijos" = hp_fijos | "ninguno" = reusar HT_resultados.csv
-    bo_iteraciones = 50L, # 12 initdesign (4*k) + 38 iteraciones inteligentes Kriging
-    lgbm_fijos = list( # Clase 08 "En Limpio" (Zulip) + tutoria Silvana
-        learning_rate = 0.005, # muy importante
-        feature_fraction = 0.5,
-        feature_fraction_bynode = 0.2,
-        min_data_in_leaf = 0L # fundamental: regulariza por min_sum_hessian_in_leaf
+    modo_ht = "fijos", # HP fijos de la planilla (Gustavo, TareaHogar 04: 472 M en 202106), sin BO
+    bo_iteraciones = 50L, # no se usa en modo "fijos"
+    excluir_dudosos = TRUE, # modelo auxiliar en el 30% + eliminar CONTINUA con prob30 > umbral
+    umbral_dudosos = 0.5,
+    hp_dudosos = list(num_iterations = 2180L, num_leaves = 30L, min_sum_hessian_in_leaf = 0.1141634103), # modelo auxiliar (Zulip)
+    lgbm_fijos = list(learning_rate = 0.005, feature_fraction = 0.5, feature_fraction_bynode = 0.2, min_data_in_leaf = 0L),
+    hp_fijos = list(
+        num_leaves = 44L, min_data_in_leaf = 0L, min_sum_hessian_in_leaf = 0.0068328532,
+        feature_fraction = 0.5, learning_rate = 0.005, num_iterations = 1920L
     ),
     bo_bordes = list(
         num_iterations = c(64L, 4096L),
         num_leaves = c(16L, 2048L),
         min_sum_hessian_in_leaf = c(1e-06, 0.1)
-    ),
-    hp_fijos = list( # solo si modo_ht = "fijos"
-        num_leaves = 68L, min_data_in_leaf = 0L, min_sum_hessian_in_leaf = 0.025,
-        feature_fraction = 0.5, learning_rate = 0.005, num_iterations = 1500L
     ),
     n_semillas_test = 10L, # mismas 10 semillas en todos los modelos (Wilcoxon pareado)
     n_semillas_prod = 50L,
@@ -118,6 +116,7 @@ if (length(PARAM$semillas) < n_semillas_total) {
 # exp10_M5_lags_ranking    | VM  | M5: lags/deltas -> ranking cero fijo sobre todo              | PENDIENTE
 # exp11_M1_hp_gustavo      | PC2 | M1 + HP fijos de Gustavo (planilla TareaHogar 04): leaves 44, hessian 0.00683, iters 1920, lr 0.005, ff 0.5, sin bynode | PENDIENTE
 # exp12_M7_lags_tend_zero  | ?   | M7: M1 + flags _zero + tend3/avg3 (En Limpio 1.3 y 1.4)    | PENDIENTE
+# exp13_M8_receta472       | Mac | M8: sin prestamos + lag1/delta1 + exclusion dudosos (prob30 > 0.5) + HP 472 M (leaves 44, hessian 0.00683, iters 1920, ff_bynode 0.2), sin undersampling | PENDIENTE
 
 # ============================================================
 # CARGA DE LIBRERIAS Y CARGA DE BASE
@@ -571,6 +570,16 @@ if (!file.exists(archivo_rds_fe)) {
         )
     }
 
+    if (PARAM$modelo == "M8") { # receta 472 M (Zulip): sin prestamos personales + lag1 y delta1
+        cols_prestamos <- c("cprestamos_personales", "mprestamos_personales")
+        dataset[, (cols_prestamos) := NULL]
+        cols_m8 <- setdiff(cols_originales, cols_prestamos)
+        setorder(dataset, numero_de_cliente, foto_mes)
+        dataset[, paste0(cols_m8, "_lag1") := shift(.SD, n = 1L, type = "lag"), by = numero_de_cliente, .SDcols = cols_m8]
+        for (v in cols_m8) set(dataset, j = paste0(v, "_delta1"), value = dataset[[v]] - dataset[[paste0(v, "_lag1")]])
+    }
+
+
     cat("Tiempo de preprocesamiento:", round(difftime(Sys.time(), tiempo_fe_inicio, units = "mins"), 2), "minutos\n")
     cat("Dimensiones finales:", nrow(dataset), "filas x", ncol(dataset), "columnas\n")
     cat("Memoria RAM del dataset:", round(as.numeric(object.size(dataset)) / (1024^3), 2), "GB\n")
@@ -715,6 +724,45 @@ idx_bo_val <- which(df_train$foto_mes == PARAM$val_bo)
 target_val_baja2 <- df_train$clase01[idx_bo_val]
 clase_ternaria_val <- df_train$clase_ternaria[idx_bo_val]
 
+# Exclusion de registros dudosos (receta 472 M, Zulip): un modelo auxiliar entrenado en el 30% de los meses
+# de entrenamiento puntua el 70% restante; se eliminan los CONTINUA con prob30 > 0.5 y el resto se entrena
+# con undersampling de CONTINUA. La particion es fija (primera semilla) para que todas las semillas usen los mismos datos.
+filtrar_dudosos <- function(idx) {
+    dt_idx <- data.table(idx = idx, clase = df_train$clase_ternaria[idx], mes = df_train$foto_mes[idx])
+    set.seed(PARAM$semillas[1], kind = "L'Ecuyer-CMRG")
+    dt_idx[, fold := sample(rep(c(rep(1L, 7L), rep(2L, 3L)), length.out = .N)), by = .(mes, clase)] # 70 / 30 estratificado
+    dt_idx[, azar := runif(.N)]
+    dt_idx[, en_muestra := clase != "CONTINUA" | azar <= PARAM$undersampling]
+
+    idx30 <- dt_idx[fold == 2L & en_muestra == TRUE, idx]
+    dtrain30 <- lgb.Dataset(
+        data = data.matrix(df_train[idx30, campos_buenos, with = FALSE]),
+        label = df_train$target_binario[idx30],
+        params = list(max_bin = PARAM$max_bin, feature_pre_filter = FALSE)
+    )
+    param30 <- list(
+        objective = "binary", metric = "none", boosting = "gbdt", boost_from_average = TRUE,
+        feature_pre_filter = FALSE, force_row_wise = TRUE, verbosity = -100L, max_depth = -1L,
+        min_gain_to_split = 0.0, lambda_l1 = 0.0, lambda_l2 = 0.0, max_bin = PARAM$max_bin,
+        min_data_in_leaf = 0L, feature_fraction = 0.5, learning_rate = 0.005,
+        num_leaves = as.integer(PARAM$hp_dudosos$num_leaves),
+        min_sum_hessian_in_leaf = as.numeric(PARAM$hp_dudosos$min_sum_hessian_in_leaf),
+        seed = PARAM$semillas[1], num_threads = parallel::detectCores()
+    )
+    modelo30 <- lgb.train(params = param30, data = dtrain30, nrounds = as.integer(PARAM$hp_dudosos$num_iterations), verbose = -100)
+
+    idx70 <- dt_idx[fold == 1L, idx]
+    prob30 <- predict(modelo30, data.matrix(df_train[idx70, campos_buenos, with = FALSE]))
+    dudoso <- df_train$clase_ternaria[idx70] == "CONTINUA" & prob30 > PARAM$umbral_dudosos
+    cat(sprintf(
+        "Exclusion de dudosos (%s): %d CONTINUA eliminados de %d registros del 70%%\n",
+        paste(sort(unique(dt_idx$mes)), collapse = "+"), sum(dudoso), length(idx70)
+    ))
+
+    idx70 <- idx70[!dudoso]
+    idx70[dt_idx[match(idx70, idx), en_muestra]] # undersampling de CONTINUA sobre el 70% filtrado
+}
+
 correr_ht <- PARAM$modo_ht != "ninguno"
 
 if (correr_ht) {
@@ -727,6 +775,7 @@ if (correr_ht) {
         df_train$foto_mes %in% PARAM$train_bo &
             (df_train$clase_ternaria %in% c("BAJA+1", "BAJA+2") | runif(nrow(df_train)) <= PARAM$undersampling)
     )
+    if (isTRUE(PARAM$excluir_dudosos)) idx_bo_train <- filtrar_dudosos(which(df_train$foto_mes %in% PARAM$train_bo))
 
     cat(sprintf(
         "Construyendo dtrain_bo (%s: %d filas) y mat_val_bo (%s: %d filas)...\n",
@@ -1118,6 +1167,7 @@ if (PARAM$etapa == "testeo") {
     }
 
     idx_test_train <- which(df_train$foto_mes %in% PARAM$train_bo)
+    if (isTRUE(PARAM$excluir_dudosos)) idx_test_train <- filtrar_dudosos(idx_test_train)
     idx_test_val <- which(df_train$foto_mes == PARAM$val_bo)
 
     dtrain_test <- lgb.Dataset(
@@ -1269,7 +1319,9 @@ if (PARAM$etapa == "produccion") {
 
     # 2. Construir Dataset Final de Entrenamiento con los 4 meses con clase completa
     #    (202103, 202104, 202105, 202106) y Matriz Futura (202108)
-    df_train_prod <- df_train[foto_mes %in% PARAM$train_final]
+    idx_prod <- which(df_train$foto_mes %in% PARAM$train_final)
+    if (isTRUE(PARAM$excluir_dudosos)) idx_prod <- filtrar_dudosos(idx_prod) # mismo filtro sobre 202103..202106
+    df_train_prod <- df_train[idx_prod]
     cat(sprintf(
         "\nEntrenando Producción sobre meses: %s (%d filas totales | %d POS [%s] | %d BAJA+2 reales)\n",
         paste(PARAM$train_final, collapse = ", "),
