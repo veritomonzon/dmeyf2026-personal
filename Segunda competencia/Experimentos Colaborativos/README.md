@@ -29,15 +29,24 @@
 
 ## 3. Hipótesis Antagónica
 
-* **Hipótesis del Grupo A (pro-ponderación):**  
-  *(Sin respuesta del Grupo A al 02-nov. A completar.)*
-* **Hipótesis B:** con un FE que ya incluye lags y delta lags, ponderar los meses del entrenamiento **no aumenta la ganancia** respecto de $w = 1$. Si aparece una diferencia, no se debe a la recencia: un placebo con los mismos pesos sin orden temporal rinde igual.
+* **Hipótesis B:** en el workflow baseline (FE con lags y delta lags de orden 1 y 2), ponderar los meses del entrenamiento por recencia **no mejora la ganancia más allá de un margen δ** respecto de $w = 1$. Si la mejora, la ventaja no se debe al orden temporal: un placebo con los mismos pesos permutados entre meses rinde igual.
+
+**Hipótesis operativas** (unidad de análisis: semilla primigenia; outcome: ganancia máxima del ensamble en 202106; $\Delta_s = G_{T1,s} - G_{T0,s}$)
+
+| | Contraste | Marco | B se sostiene si… |
+| :--- | :--- | :--- | :--- |
+| **H1 (primaria)** | T1 (decaimiento, $w = 0.5^{\Delta t/12}$) vs. T0 ($w = 1$) | No superioridad, unilateral | Se rechaza $H_0: \Delta \geq \delta$ a favor de $\Delta < \delta$. |
+| **H2 (secundaria)** | T1 vs. T2 (placebo) | Equivalencia, TOST $\pm\delta$ | T1 y T2 quedan dentro de $\pm\delta$. Es decisiva si H1 no se confirma. |
+| **Exploratoria** | T3 (ventana dura) vs. T1 | Descriptiva | — |
+
+*Refutación:* B se refuta si T1 supera a T0 en más de δ **y** supera al placebo T2. *Jerarquía:* H1 se testea primero y H2 después (secuencia fija), así que no hace falta corregir por multiplicidad.
 
 **Objetivos**
-1. Estimar la diferencia de ganancia en 202106 entre ponderar por recencia (T1) y no ponderar (T0).
-2. Separar el efecto de la recencia del efecto de tener pesos en sí (T1 vs. placebo T2).
-3. Comparar ponderar con seleccionar meses (T1 vs. ventana dura T3).
-4. Decidir si la ponderación entra o no al workflow de la Segunda Competencia.
+1. **Primario:** estimar la diferencia de ganancia en 202106 entre ponderar por recencia (T1) y no ponderar (T0), y testear la no superioridad de T1 con margen δ.
+2. **Secundario:** separar el efecto de la recencia del efecto de tener pesos en sí (T1 vs. placebo T2).
+3. **Exploratorio:** comparar ponderar con seleccionar meses (T1 vs. ventana dura T3).
+4. **Aplicado:** decidir si la ponderación entra al workflow de la Segunda Competencia.
+
 
 ---
 
@@ -130,8 +139,8 @@ Quedan como extensiones si los resultados no son concluyentes:
 * **Métrica primaria:** ganancia máxima del **ensamble** de 10 semillas en 202106 y cantidad de envíos en la que se alcanza, como pide la diapositiva del baseline. Hay un valor por semilla primigenia.
 * **Ensamble vs. media (bitácora de la cátedra):** la ganancia del ensamble no es lo mismo que la media de las ganancias de cada semilla. Se decide por el ensamble; la media por semilla se reporta como descriptiva.
 * **Robustez:** ganancia en cortes fijos de envíos alrededor del máximo, para no depender de un único punto de la curva.
-* **Comparación pareada:** para cada semilla primigenia $s$, $d_s = G_{T_i,s} - G_{T0,s}$. Wilcoxon de rangos con signo sobre las diferencias (Demšar, 2006). Las dos comparaciones principales son T1 vs. T0 y T1 vs. T2, con corrección de Holm.
-* **Equivalencia (TOST, Lakens 2017):** $\delta$ = desvío estándar de la ganancia de T0 entre semillas primigenias. Se fija después de correr T0 y antes de correr T1–T3, y se registra con fecha *(a confirmar con Fray)*.
+* **Comparación pareada:** para cada semilla primigenia $s$, $\Delta_s = G_{T_i,s} - G_{T0,s}$, con pruebas de Wilcoxon de rangos con signo (Demšar, 2006). Las dos comparaciones principales se testean en secuencia fija: H1 (T1 vs. T0) primero y H2 (T1 vs. T2) después, así que no hace falta corregir por multiplicidad.
+* **No superioridad y equivalencia (Lakens, 2017):** H1 se contrasta con un Wilcoxon unilateral sobre $\Delta_s - \delta$ ($H_0: \Delta \geq \delta$). H2 se contrasta con TOST dentro de $\pm\delta$. El margen $\delta$ es el desvío estándar de la ganancia de T0 entre semillas primigenias; se fija después de correr T0 y antes de correr T1–T3, y se registra con fecha *(a confirmar con Fray)*.
 * **Lectura de resultados:**
 
   | | T1 > T0 | T1 ≈ T0 o T1 < T0 |
@@ -139,7 +148,8 @@ Quedan como extensiones si los resultados no son concluyentes:
   | **T1 > T2** (el orden temporal importa) | Gana A: la recencia mejora la ganancia. | Caso no esperado: se discute. |
   | **T1 ≈ T2** (el orden no importa) | Gana B: ayudan los pesos, no la recencia. | Gana B: ponderar no mejora. |
 
-  Si no se alcanza ni diferencia ni equivalencia, la conclusión es "no se detectó diferencia", no "son iguales".
+  Si no se rechaza $H_0$ en H1 y T1 tampoco supera a T0 en más de $\delta$, la conclusión es "inconcluso", no "son iguales".
+
 * **Control de bordes de la BO:** en cada workflow se revisa si el mejor trial toca algún borde del rango de búsqueda. Si lo toca, se informa y se discute.
 * **Diagnósticos:** ESS de cada vector de pesos, proporción ponderada de positivos (BAJA+1 y BAJA+2) en el training, hiperparámetros elegidos por la BO en cada tratamiento e importancia de variables (lags y deltas frente a variables del mes).
 
@@ -148,7 +158,7 @@ Quedan como extensiones si los resultados no son concluyentes:
 ## 8. Limitaciones Reconocidas
 
 1. **Sin walk-forward:** la conclusión descansa en un solo mes de testeo (202106). Repetir los 30–40 workflows en otros meses multiplica el costo, así que las réplicas quedan como Futuros.
-2. **Pocas unidades pareadas:** con 10 semillas primigenias (o menos, si el cómputo no alcanza) el TOST tiene poca potencia. Si $\delta$ es chico, el resultado más probable es "inconcluso".
+2. **Pocas unidades pareadas:** con 10 semillas primigenias (o menos, si el cómputo no alcanza) el contraste de no superioridad, aunque es unilateral, tiene poca potencia. Si $\delta$ es chico, el resultado más probable es "inconcluso".
 3. **Elección de $\delta$:** basar el margen en la variabilidad entre semillas es una decisión nuestra. Otro criterio, por ejemplo uno económico, podría cambiar la conclusión.
 4. **BO corta:** 10 evaluaciones sin iteraciones bayesianas se parecen más a una búsqueda al azar, así que parte de las diferencias entre tratamientos podría ser ruido de la búsqueda. Si algún hiperparámetro queda contra un borde, la comparación puede estar midiendo los límites del rango.
 5. **Normalización y undersampling:** la normalización iguala la masa total de hessianos, pero no su distribución entre hojas. Además, los pesos se combinan con el undersampling 0,1, que ya reescala implícitamente la clase mayoritaria.
