@@ -14,6 +14,8 @@
 * **Documento de trabajo:** [Ponderación temporal (Google Docs)](https://docs.google.com/document/d/13Nkwsfk4xz29yy1ei74yHat9oJ8LUulc_AmNnZ4VskA/edit?usp=sharing)
 * **GitHub colaborativo:** [germandasr/DMEyF_Exp_Colaborativos](https://github.com/germandasr/DMEyF_Exp_Colaborativos) (baseline compartido en `BASELINE_FINAL.ipynb`).
 * **Bitácora de la cátedra:** `experimentos_colaborativos_bitacora_2026.pptx`.
+* **Nuestra presentación (Grupo B):** [experimentos_colaborativos_campos_monzon (Google Slides)](https://docs.google.com/presentation/d/1Ht9rjh2ypUyzs9tYzkwG9omHKbGZOG3W/edit?usp=sharing).
+
 
 ---
 
@@ -81,7 +83,7 @@
 
 ## 5. Sesgos y Preconceptos de los Integrantes
 
-* **Verónica Ester Monzón:** Mi creencia previa va en contra de nuestra hipótesis: intuyo que la cuarentena de 2020 fue un shock aberrante y que darle menos peso va a ayudar. A la vez, desconfío de cualquier intervención que se evalúe sin un grupo control adecuado: si dos tratamientos difieren en más de una cosa, no sé a cuál atribuirle el efecto. Por eso incluimos un placebo.
+* **Verónica Ester Monzón:** Mi intuición clínica es que el COVID fue un shock y que conviene restarle peso, en contra de lo que defendemos. Además, mi formación me hace sobrevalorar el placebo: tiendo a no creer un resultado si no se descartó el efecto placebo, aunque la diferencia sea grande.
 * **Fray Campos:** *(A completar.)*
 
 ---
