@@ -92,7 +92,7 @@ Evaluar si la ponderación temporal de los meses del entrenamiento propuesta por
 ## 5. Sesgos y Preconceptos de los Integrantes
 
 * **Verónica Ester Monzón:** Mi intuición clínica es que el COVID fue un shock y que conviene restarle peso, en contra de lo que defendemos. Además, mi formación me hace sobrevalorar el placebo: tiendo a no creer un resultado si no se descartó el efecto placebo, aunque la diferencia sea grande.
-* **Fray Campos:** El comportamiento humano presenta rezagos frente a shocks, similares a los efectos diferidos de la política monetaria. Mi sesgo apunta a que la ponderación de atributos a shocks puntuales no necesariamente mejora la predicción de comportamientos futuros.
+* **Fray Campos:** El comportamiento humano presenta rezagos frente a shocks, similares a los efectos diferidos de la política monetaria. Mi sesgo apunta a que la ponderación de meses ante shocks puntuales no necesariamente mejora la predicción de comportamientos futuros.
 
 ---
 
